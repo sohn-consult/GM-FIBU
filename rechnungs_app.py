@@ -9,6 +9,7 @@ import re
 # --- 1. DESIGN & KONFIGURATION ---
 st.set_page_config(page_title="Sohn-Consult | Executive BI", page_icon="👔", layout="wide")
 
+# Modernes Corporate Design mit hohem Kontrast
 st.markdown("""
     <style>
     .stApp { background-color: #F8FAFC; }
@@ -41,7 +42,7 @@ def to_excel(df):
     return output.getvalue()
 
 st.title("👔 Sohn-Consult | Strategic BI Dashboard")
-st.caption("Forensic Edition: Advanced Data Integrity & Business Intelligence")
+st.caption("Forensic, Strategic Reporting & Cashflow - Version 2026.3")
 st.markdown("---")
 
 # --- 2. MULTI-UPLOAD BEREICH ---
@@ -67,6 +68,7 @@ if fibu_file:
                 else:
                     df_raw = pd.read_excel(fibu_file, header=header_row-1)
             
+            # STABILITÄT: Alle Spaltennamen in Strings umwandeln (Fix für Arrow-Fehler)
             df_raw.columns = [str(c).strip() for c in df_raw.columns]
             cols = [c for c in df_raw.columns if "Unnamed" not in c and c != "nan"]
             df_work = df_raw[cols].dropna(how='all', axis=0).copy()
@@ -84,9 +86,9 @@ if fibu_file:
             c_bet = st.selectbox("Betrag", cols, index=find_idx(["brutto", "betrag", "umsatz"]))
             c_pay = st.selectbox("Zahldatum", cols, index=find_idx(["gezahlt", "ausgleich", "eingang"]))
 
-            # Transformation
+            # Transformation & Bereinigung
             df_work[c_dat] = pd.to_datetime(df_work[c_dat], errors='coerce')
-            df_work['Fällig_Display'] = df_work[c_fae].astype(str) 
+            df_work['Fällig_Display'] = df_work[c_fae].astype(str) # Original-Strings für Tabellenanzeige
             df_work[c_fae] = pd.to_datetime(df_work[c_fae], errors='coerce')
             df_work[c_pay] = pd.to_datetime(df_work[c_pay], errors='coerce')
             
@@ -108,7 +110,6 @@ if fibu_file:
             st.error(f"Fehler beim Laden: {e}")
             start_btn = False
 
-    # --- 3. ANALYSE ENGINE ---
     if start_btn and len(date_range) == 2:
         mask = (df_work[c_dat].dt.date >= date_range[0]) & \
                (df_work[c_dat].dt.date <= date_range[1]) & \
@@ -122,26 +123,28 @@ if fibu_file:
 
         tabs = st.tabs(["📊 Performance", "🔴 Aging & Offene Posten", "💎 Strategie & Risiko", "🔍 Forensik", "🏦 Bank-Match"])
 
+        # --- TAB 1: PERFORMANCE ---
         with tabs[0]:
             k1, k2, k3, k4 = st.columns(4)
             rev = f_df[c_bet].sum()
             k1.metric("Gesamtumsatz", format_euro(rev))
             k2.metric("Offene Posten", format_euro(df_offen[c_bet].sum()))
             dso = (df_paid[c_pay] - df_paid[c_dat]).dt.days.mean()
-            k3.metric("Ø Zahlungsdauer", f"{dso:.1f} Tage" if not pd.isna(dso) else "N/A")
+            k3.metric("Ø Zahlungsdauer (DSO)", f"{dso:.1f} Tage" if not pd.isna(dso) else "N/A")
             k4.metric("Belege", len(f_df))
 
             c_p1, c_p2 = st.columns([2, 1])
             with c_p1:
                 f_df['Monat'] = f_df[c_dat].dt.strftime('%Y-%m')
-                st.plotly_chart(px.bar(f_df.groupby('Monat')[c_bet].sum().reset_index(), x='Monat', y=c_bet, color_discrete_sequence=['#1E3A8A'], title="Umsatz pro Monat"), use_container_width=True)
+                st.plotly_chart(px.bar(f_df.groupby('Monat')[c_bet].sum().reset_index(), x='Monat', y=c_bet, color_discrete_sequence=['#1E3A8A'], title="Umsatz pro Monat"), width='stretch')
             with c_p2:
                 f_df = f_df.sort_values(c_dat)
                 f_df['Kumuliert'] = f_df[c_bet].cumsum()
-                st.plotly_chart(px.area(f_df, x=c_dat, y='Kumuliert', title="Wachstumspfad", color_discrete_sequence=['#3B82F6']), use_container_width=True)
+                st.plotly_chart(px.area(f_df, x=c_dat, y='Kumuliert', title="Wachstumspfad", color_discrete_sequence=['#3B82F6']), width='stretch')
 
+        # --- TAB 2: AGING & OFFENE POSTEN ---
         with tabs[1]:
-            st.subheader("Forderungs-Management")
+            st.subheader("Forderungs-Management & Aging")
             col_a1, col_a2 = st.columns([1, 2])
             with col_a1:
                 df_offen['Verzug'] = (today - df_offen[c_fae]).dt.days
@@ -152,84 +155,69 @@ if fibu_file:
                     if d <= 60: return "3. 31-60 Tage"
                     return "4. > 60 Tage"
                 df_offen['Bucket'] = df_offen['Verzug'].apply(bucket)
-                st.plotly_chart(px.pie(df_offen.groupby('Bucket')[c_bet].sum().reset_index(), values=c_bet, names='Bucket', hole=0.5, title="Überfälligkeiten"), use_container_width=True)
+                st.plotly_chart(px.pie(df_offen.groupby('Bucket')[c_bet].sum().reset_index(), values=c_bet, names='Bucket', hole=0.5, title="Überfälligkeiten"), width='stretch')
             
             with col_a2:
+                # STABILITÄT: Scatter Plot Fix für negative Werte (ValueError)
                 df_predict = df_offen.groupby(c_fae)[c_bet].sum().reset_index()
                 if not df_predict.empty:
-                    df_predict['Betrag_Abs'] = df_predict[c_bet].abs().clip(lower=0.1) 
-                    st.plotly_chart(px.scatter(df_predict, x=c_fae, y=c_bet, size='Betrag_Abs', title="Cashflow-Prognose", color_discrete_sequence=['#10B981']), use_container_width=True)
+                    df_predict['Betrag_Abs'] = df_predict[c_bet].abs().clip(lower=0.1)
+                    st.plotly_chart(px.scatter(df_predict, x=c_fae, y=c_bet, size='Betrag_Abs', title="Cashflow-Prognose (Größe = Betrag)", color_discrete_sequence=['#10B981']), width='stretch')
             
+            # STABILITÄT: Anzeige-Fix (Arrow-Compatibility)
             disp_df = df_offen[[c_dat, c_fae, c_kun, c_bet, 'Verzug']].copy()
             disp_df[c_dat] = disp_df[c_dat].dt.strftime('%d.%m.%Y')
-            disp_df[c_fae] = disp_df[c_fae].dt.strftime('%d.%m.%Y').fillna("unbekannt")
-            st.dataframe(disp_df.sort_values('Verzug', ascending=False), column_config={c_bet: st.column_config.NumberColumn(format="%.2f €")}, use_container_width=True)
+            disp_df[c_fae] = df_offen['Fällig_Display']
+            st.dataframe(disp_df.sort_values('Verzug', ascending=False), column_config={c_bet: st.column_config.NumberColumn(format="%.2f €")}, width='stretch')
+            st.download_button("📥 Excel-Liste exportieren", to_excel(df_offen), "Offene_Posten.xlsx")
 
+        # --- TAB 3: STRATEGIE & RISIKO ---
         with tabs[2]:
-            st.subheader("ABC-Analyse & Klumpenrisiko")
+            st.subheader("Strategische Analyse: ABC & Klumpenrisiko")
             abc = f_df.groupby(c_kun)[c_bet].sum().reset_index().sort_values(by=c_bet, ascending=False)
-            st.plotly_chart(px.bar(abc.head(15), x=c_kun, y=c_bet, title="Top 15 Kundenumsätze", color_discrete_sequence=['#1E3A8A']), use_container_width=True)
+            st.plotly_chart(px.bar(abc.head(15), x=c_kun, y=c_bet, title="Top 15 Kundenumsätze", color_discrete_sequence=['#1E3A8A']), width='stretch')
             top3 = (abc[c_bet].head(3).sum() / rev) * 100 if rev > 0 else 0
             st.metric("Klumpenrisiko (Top 3 Kunden)", f"{top3:.1f}%")
 
+        # --- TAB 4: FORENSIK ---
         with tabs[3]:
             st.subheader("🔍 Forensik & Daten-Integrität")
-            
-            # 1. Daten-Vollständigkeit
-            st.markdown("### 1. Datenqualitäts-Check")
-            missing_count = f_df.isna().sum().sum()
-            if missing_count == 0:
-                st.success("✅ Datensatz ist vollständig (keine leeren Felder in den Hauptspalten).")
-            else:
-                st.info(f"ℹ️ Es wurden {missing_count} leere Felder im Datensatz gefunden.")
+            st.markdown("### 1. Daten-Vollständigkeit")
+            miss_c = f_df.isna().sum().sum()
+            if miss_c == 0: st.success("✅ Datensatz ist vollständig.")
+            else: st.info(f"ℹ️ {miss_c} leere Felder gefunden.")
 
             l1, l2 = st.columns(2)
             with l1:
-                st.markdown("### 2. Zeitliche Plausibilität")
+                st.markdown("### 2. Zeitliche Logik")
                 err = f_df[f_df[c_pay] < f_df[c_dat]]
                 if not err.empty:
-                    st.error(f"❌ {len(err)} Buchungsfehler gefunden: Zahlungseingang liegt zeitlich VOR dem Rechnungsdatum.")
+                    st.error(f"❌ {len(err)} Fehler: Zahlung vor Rechnungsdatum.")
                     st.dataframe(err[[c_dat, c_pay, c_kun, c_bet]])
-                else:
-                    st.success("✅ Zeitliche Logik einwandfrei (Zahldaten liegen nach Rechnungsdaten).")
+                else: st.success("✅ Datum-Logik einwandfrei.")
 
             with l2:
                 st.markdown("### 3. Nummernkreis-Analyse")
                 try:
-                    # Robuster RE-Nummern Check: Extrahiert nur Zahlen aus dem Text
-                    def extract_number(val):
-                        nums = re.findall(r'\d+', str(val))
-                        return int(nums[-1]) if nums else None
-                    
-                    nums_extracted = f_df[c_nr].apply(extract_number).dropna().sort_values().unique()
-                    
-                    if len(nums_extracted) > 1:
-                        miss = np.setdiff1d(np.arange(nums_extracted.min(), nums_extracted.max() + 1), nums_extracted)
+                    def extract_n(v):
+                        n = re.findall(r'\d+', str(v))
+                        return int(n[-1]) if n else None
+                    nums = f_df[c_nr].apply(extract_n).dropna().sort_values().unique()
+                    if len(nums) > 1:
+                        miss = np.setdiff1d(np.arange(nums.min(), nums.max() + 1), nums)
                         if len(miss) > 0:
-                            st.warning(f"⚠️ Es fehlen {len(miss)} Rechnungsnummern in der Abfolge.")
-                            with st.expander("Fehlende Nummern anzeigen (Auszug)"):
-                                st.write(miss[:50])
-                        else:
-                            st.success("✅ Rechnungsnummernkreis ist lückenlos.")
-                    else:
-                        st.info("ℹ️ Zu wenig Daten für eine Nummernkreis-Analyse.")
-                except Exception as e:
-                    st.info(f"ℹ️ Nummernkreis-Check konnte nicht ausgeführt werden.")
+                            st.warning(f"⚠️ {len(miss)} Nummern fehlen.")
+                            with st.expander("Fehlende Nummern anzeigen"): st.write(miss[:50])
+                        else: st.success("✅ Nummernkreis lückenlos.")
+                except: st.info("ℹ️ Check nicht möglich.")
 
-            st.markdown("### 4. Dubletten-Prüfung")
-            dubs = f_df[f_df.duplicated(subset=[c_nr, c_bet], keep=False)]
-            if not dubs.empty:
-                st.warning(f"⚠️ {len(dubs)} mögliche Dubletten gefunden (identische Rechnungsnummer & Betrag).")
-                st.dataframe(dubs[[c_dat, c_nr, c_kun, c_bet]])
-            else:
-                st.success("✅ Keine identischen Rechnungs-Dubletten gefunden.")
-
+        # --- TAB 5: BANK-MATCH ---
         with tabs[4]:
             st.subheader("Bank-Reconciliation (Matching)")
             if bank_file:
                 df_bank = pd.read_csv(bank_file, sep=None, engine='python')
                 st.success("Bankdaten geladen.")
-                st.dataframe(df_bank.head(15), use_container_width=True)
+                st.dataframe(df_bank.head(15), width='stretch')
             else:
                 st.info("Laden Sie eine Bank-CSV hoch, um den Abgleich zu nutzen.")
     else:
