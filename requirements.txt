@@ -3,3 +3,4 @@ streamlit
 openpyxl
 plotly
 xlsxwriter
+PyPDF2
