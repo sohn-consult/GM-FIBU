@@ -645,4 +645,277 @@ missing_re = int((f["RE_Nr"].astype("string").str.strip() == "").sum())
 dq_score = 100
 dq_score -= min(30, missing_faellig)
 dq_score -= min(20, missing_kunde)
-dq_score -= min(20,
+dq_score -= min(20, missing_re)
+dq_score = max(0, dq_score)
+
+if overdue_pct <= target_overdue_pct:
+    overdue_badge = badge_html("ok", f"Überfällig {overdue_pct:.1f}%")
+elif overdue_pct <= target_overdue_pct + 10:
+    overdue_badge = badge_html("warn", f"Überfällig {overdue_pct:.1f}%")
+else:
+    overdue_badge = badge_html("bad", f"Überfällig {overdue_pct:.1f}%")
+
+if dso is None:
+    dso_badge = badge_html("warn", "DSO n v")
+elif dso <= target_dso:
+    dso_badge = badge_html("ok", f"DSO {dso:.1f} T")
+elif dso <= target_dso + 10:
+    dso_badge = badge_html("warn", f"DSO {dso:.1f} T")
+else:
+    dso_badge = badge_html("bad", f"DSO {dso:.1f} T")
+
+if dq_score >= 85:
+    dq_badge = badge_html("ok", f"Datenqualität {dq_score}/100")
+elif dq_score >= 70:
+    dq_badge = badge_html("warn", f"Datenqualität {dq_score}/100")
+else:
+    dq_badge = badge_html("bad", f"Datenqualität {dq_score}/100")
+
+# =========================================================
+# HEADER BAR
+# =========================================================
+mandant_name = "Mandant"
+if sel_customers and len(sel_customers) == 1 and sel_customers[0].strip():
+    mandant_name = sel_customers[0].strip()
+elif sel_customers and len(sel_customers) > 1:
+    mandant_name = f"{len(sel_customers)} Kunden"
+
+st.markdown(
+    textwrap.dedent(
+        f"""
+        <div class="topbar">
+          <div>
+            <div class="brand">Sohn Consult Executive Cash BI</div>
+            <div class="sub">Quelle: {sheet_used} | Stand: {format_date_de(date.today())} | Zeitraum: {format_date_de(d_from)} bis {format_date_de(d_to)}</div>
+          </div>
+          <div class="pillRow">
+            <div class="pill"><b>Scope:</b> {mandant_name}</div>
+            <div class="pill"><b>Belege:</b> {len(f)}</div>
+            <div class="pill"><b>Offen:</b> {len(offen)}</div>
+            <div class="pill"><b>Bezahlt:</b> {len(bezahlt)}</div>
+          </div>
+        </div>
+        """
+    ).strip(),
+    unsafe_allow_html=True,
+)
+
+# =========================================================
+# EXEC KPIS
+# =========================================================
+st.markdown("## Executive Überblick")
+render_kpis(
+    [
+        {"label": "Umsatz im Zeitraum", "value": money_display(rev, compact_numbers), "delta": "Basis: Import + Filter"},
+        {"label": "Offene Posten", "value": money_display(op_sum, compact_numbers), "delta": f"{overdue_badge}"},
+        {"label": "Cash In Prognose 30 Tage", "value": money_display(cash_30, compact_numbers), "delta": f"≤ 7T {money_display(cash_7, compact_numbers)} | ≤ 14T {money_display(cash_14, compact_numbers)}"},
+        {"label": "Governance", "value": "OK" if overdue_pct <= target_overdue_pct else "Handlungsbedarf", "delta": f"{dso_badge} &nbsp; {dq_badge}"},
+    ]
+)
+
+# =========================================================
+# SANITY CHECKS
+# =========================================================
+with st.expander("Sanity Checks CFO", expanded=False):
+    st.markdown("### Top 20 Ausreißer Beträge")
+    st.dataframe(
+        df_for_display(
+            f.sort_values("Betrag", ascending=False).head(20),
+            money_cols=["Betrag"],
+            date_cols=["RE_Datum", "Faellig", "Gezahlt_Am"],
+        ),
+        width="stretch",
+    )
+
+# =========================================================
+# CFO CHARTS
+# =========================================================
+st.divider()
+st.markdown("## CFO Charts")
+cC1, cC2, cC3 = st.columns([2, 1, 1])
+
+with cC1:
+    st.markdown("### Cash In Forecast 60 Tage")
+    if offen.empty or offen["Faellig"].isna().all():
+        st.info("Forecast benötigt Fälligkeit. Aktuell fehlen Fälligkeiten oder es gibt keine offenen Posten.")
+    else:
+        tmp = offen[offen["Faellig"].notna()].copy()
+        horizon_end = (today + pd.Timedelta(days=60)).date()
+        tmp = tmp[tmp["Faellig"].dt.date <= horizon_end]
+        tmp["Woche"] = tmp["Faellig"].dt.to_period("W").apply(lambda p: p.start_time.date())
+        weekly = tmp.groupby("Woche", as_index=False)["Betrag"].sum().sort_values("Woche")
+        weekly["Woche"] = pd.to_datetime(weekly["Woche"])
+        fig = px.area(weekly, x="Woche", y="Betrag")
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=320)
+        fig.update_yaxes(tickformat=",.0f")
+        st.plotly_chart(fig, width="stretch")
+
+with cC2:
+    st.markdown("### Aging Mix")
+    if offen.empty:
+        st.info("Keine offenen Posten.")
+    else:
+        aging = offen.groupby("Aging", as_index=False)["Betrag"].sum()
+        fig = px.pie(aging, names="Aging", values="Betrag", hole=0.55)
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=320, legend_title_text="")
+        st.plotly_chart(fig, width="stretch")
+
+with cC3:
+    st.markdown("### Top Debitoren")
+    if f.empty:
+        st.info("Keine Daten im Filter.")
+    else:
+        by_c = f.groupby("Kunde", as_index=False)["Betrag"].sum().sort_values("Betrag", ascending=False)
+        top = by_c.head(10).copy()
+        fig = px.bar(top, x="Kunde", y="Betrag")
+        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=320)
+        fig.update_xaxes(tickangle=45)
+        fig.update_yaxes(tickformat=",.0f")
+        st.plotly_chart(fig, width="stretch")
+
+# =========================================================
+# TABLES (CRASH PROOF)
+# =========================================================
+st.divider()
+st.markdown("## Offene Posten Übersicht")
+
+tabs = st.tabs(["Offen", "Überfällig", "Überfällig > 60", "Alle Belege"])
+
+cols_show_base = ["Kunde", "RE_Nr", "RE_Datum", "Faellig", "Betrag", "Gezahlt_Am", "VerzugTage", "Aging"]
+date_cols = ["RE_Datum", "Faellig", "Gezahlt_Am"]
+money_cols = ["Betrag"]
+
+with tabs[0]:
+    show = existing_cols(offen, cols_show_base)
+    st.dataframe(
+        df_for_display(offen[show].head(int(show_rows)), money_cols=money_cols, date_cols=existing_cols(offen, date_cols)),
+        width="stretch",
+    )
+
+with tabs[1]:
+    ov = offen.loc[offen["VerzugTage"] > 0].copy()
+    show = existing_cols(ov, cols_show_base)
+    st.dataframe(
+        df_for_display(ov[show].head(int(show_rows)), money_cols=money_cols, date_cols=existing_cols(ov, date_cols)),
+        width="stretch",
+    )
+
+with tabs[2]:
+    gt = offen.loc[offen["VerzugTage"] > 60].copy()
+    show = existing_cols(gt, cols_show_base)
+    st.dataframe(
+        df_for_display(gt[show].head(int(show_rows)), money_cols=money_cols, date_cols=existing_cols(gt, date_cols)),
+        width="stretch",
+    )
+
+with tabs[3]:
+    show = existing_cols(f, cols_show_base)
+    st.dataframe(
+        df_for_display(f[show].head(int(show_rows)), money_cols=money_cols, date_cols=existing_cols(f, date_cols)),
+        width="stretch",
+    )
+
+# =========================================================
+# EXPORTS
+# =========================================================
+st.divider()
+st.markdown("## Exporte")
+
+e1, e2, e3 = st.columns([1, 1, 1])
+show_export = existing_cols(offen, cols_show_base)
+
+with e1:
+    st.download_button(
+        "Export OP Liste Excel",
+        data=to_excel_bytes(offen[show_export], sheet_name="OP"),
+        file_name="OP_Liste.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+with e2:
+    by_cust = f.groupby("Kunde", as_index=False)["Betrag"].sum().sort_values("Betrag", ascending=False)
+    st.download_button(
+        "Export Kundenumsatz Excel",
+        data=to_excel_bytes(by_cust, sheet_name="Kunden"),
+        file_name="Kunden_Umsatz.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+with e3:
+    base_cols = existing_cols(f, ["Kunde", "RE_Nr", "RE_Datum", "Faellig", "Betrag", "Gezahlt_Am"])
+    st.download_button(
+        "Export Belege Excel",
+        data=to_excel_bytes(f[base_cols], sheet_name="Belege"),
+        file_name="Belege.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+# =========================================================
+# BANK RECONCILIATION
+# =========================================================
+st.divider()
+st.markdown("## Bank Abgleich")
+
+if not bank_pdf:
+    st.info("Optional: Bank PDF hochladen, um Zahlungseingänge zuzuordnen.")
+else:
+    if not HAS_PDF:
+        st.warning("PyPDF2 ist nicht verfügbar. Bank PDF Parsing ist deaktiviert.")
+    else:
+        bank = parse_bank_pdf(bank_pdf)
+        if bank.empty:
+            st.warning("Keine Buchungen erkannt. Wenn das PDF ein Scan ist, braucht es OCR. Diese Version nutzt kein OCR.")
+        else:
+            matches, unmatched = reconcile_bank_vs_open(bank, offen)
+            total_in = float(bank.loc[bank["Betrag"] > 0, "Betrag"].sum())
+            match_rate = (len(matches) / max(1, len(bank[bank["Betrag"] > 0]))) * 100
+
+            render_kpis(
+                [
+                    {"label": "Bank Eingänge positiv", "value": money_display(total_in, compact_numbers), "delta": f"Match Quote {match_rate:.0f}%"},
+                    {"label": "Matches", "value": f"{len(matches)}", "delta": "RE Nummer oder Betrag"},
+                    {"label": "Unmatched", "value": f"{len(unmatched)}", "delta": "Manuelle Prüfung"},
+                    {"label": "OP Summe", "value": money_display(op_sum, compact_numbers), "delta": "Basis OP"},
+                ]
+            )
+
+            b1, b2 = st.columns([1, 1])
+            with b1:
+                st.markdown("### Matches")
+                if matches.empty:
+                    st.info("Keine Matches gefunden.")
+                else:
+                    mcols = existing_cols(matches, ["Buchung", "Betrag", "Gegenpartei", "RE_Nr", "Kunde", "Invoice_Betrag", "MatchType"])
+                    st.dataframe(
+                        df_for_display(matches[mcols].head(int(show_rows)), money_cols=["Betrag", "Invoice_Betrag"], date_cols=existing_cols(matches, ["Buchung"])),
+                        width="stretch",
+                    )
+            with b2:
+                st.markdown("### Unmatched Eingänge")
+                if unmatched.empty:
+                    st.success("Keine Unmatched Eingänge.")
+                else:
+                    ucols = existing_cols(unmatched, ["Buchung", "Betrag", "Gegenpartei", "Verwendungszweck"])
+                    st.dataframe(
+                        df_for_display(unmatched[ucols].head(int(show_rows)), money_cols=["Betrag"], date_cols=existing_cols(unmatched, ["Buchung"])),
+                        width="stretch",
+                    )
+
+            x1, x2 = st.columns(2)
+            with x1:
+                st.download_button(
+                    "Export Bank Matches Excel",
+                    data=to_excel_bytes(matches, sheet_name="Matches"),
+                    file_name="Bank_Matches.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            with x2:
+                st.download_button(
+                    "Export Bank Unmatched Excel",
+                    data=to_excel_bytes(unmatched, sheet_name="Unmatched"),
+                    file_name="Bank_Unmatched.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
