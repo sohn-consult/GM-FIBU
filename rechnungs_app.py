@@ -82,17 +82,6 @@ st.markdown(
     .bWARN { color: var(--warn); background: rgba(245,158,11,0.10); border-color: rgba(245,158,11,0.25); }
     .bBAD { color: var(--bad); background: rgba(220,38,38,0.08); border-color: rgba(220,38,38,0.25); }
 
-    .insights{
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 12px 14px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-    }
-    .insTitle { font-weight: 900; color: var(--text); margin-bottom: 6px; }
-    .insLine { color: var(--text); font-size: 13px; margin: 6px 0; }
-    .insMuted { color: var(--muted); font-size: 12px; margin-top: 8px; }
-
     @media (max-width: 1100px) {
       .kpiGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .kpiValue { font-size: 18px; }
@@ -254,7 +243,6 @@ def to_date_series(s: pd.Series) -> pd.Series:
     x = s.astype("string").str.strip()
     x = x.replace({"": pd.NA, "nan": pd.NA, "NaT": pd.NA})
 
-    # Erst definierte Formate, dann Fallback
     dt1 = pd.to_datetime(x, format="%d.%m.%Y", errors="coerce")
     dt2 = pd.to_datetime(x, format="%d.%m.%Y %H:%M", errors="coerce")
     dt3 = pd.to_datetime(x, format="%d.%m.%Y %H:%M:%S", errors="coerce")
@@ -274,7 +262,7 @@ def guess_col(cols: list[str], keys: list[str]) -> str | None:
     return None
 
 # =========================================================
-# EXCEL LOADING (STABLE)
+# EXCEL LOADING
 # =========================================================
 def read_excel_raw(file, sheet_name: str) -> pd.DataFrame:
     return pd.read_excel(file, sheet_name=sheet_name, header=None, engine="openpyxl")
@@ -328,15 +316,14 @@ def build_invoice_table(df_norm: pd.DataFrame, col_kunde, col_re, col_redat, col
     out["RE_Nr"] = out["RE_Nr"].fillna("").astype("string").str.strip()
     out["Betrag"] = pd.to_numeric(out["Betrag"], errors="coerce").fillna(0.0)
 
-    # Mindestens Rechnungsdatum + Betrag
     out = out.dropna(subset=["RE_Datum"]).copy().reset_index(drop=True)
     return out
 
 # =========================================================
 # BANK PDF PARSER + RECONCILIATION
 # =========================================================
-TX_RE = re.compile(r"\)\s*(\d{2}\.\d{2}\.\d{4})\s*(\d{2}\.\d{2}\.\d{4})\s*([+-]?\d{1,3}(?:\.\d{3})*,\d{2})")
 INVOICE_NO_RE = re.compile(r"\b(20\d{6,}[-/]\S+|\d{6,})\b")
+TX_RE = re.compile(r"\)\s*(\d{2}\.\d{2}\.\d{4})\s*(\d{2}\.\d{2}\.\d{4})\s*([+-]?\d{1,3}(?:\.\d{3})*,\d{2})")
 
 def parse_bank_pdf(file) -> pd.DataFrame:
     if not HAS_PDF:
@@ -421,7 +408,6 @@ def reconcile_bank_vs_open(bank: pd.DataFrame, open_inv: pd.DataFrame) -> tuple[
     used_bank = set()
     matches = []
 
-    # Match: RE Nummer aus Text
     for bidx, br in bank_in.iterrows():
         text = f"{br.get('Gegenpartei','')} {br.get('Verwendungszweck','')}".strip()
         tokens = [str(t).strip() for t in INVOICE_NO_RE.findall(text)]
@@ -454,7 +440,6 @@ def reconcile_bank_vs_open(bank: pd.DataFrame, open_inv: pd.DataFrame) -> tuple[
                 }
             )
 
-    # Match: Betrag, optional Name Hit
     tolerance = 0.02
     still_open = inv.drop(index=list(used_inv), errors="ignore").copy()
     if not still_open.empty:
@@ -508,7 +493,7 @@ def reconcile_bank_vs_open(bank: pd.DataFrame, open_inv: pd.DataFrame) -> tuple[
 # =========================================================
 with st.sidebar:
     st.header("Import")
-    fibu_file = st.file_uploader("1) Excel oder CSV (OP Debitoren)", type=["xlsx", "xls", "csv"])
+    fibu_file = st.file_uploader("1) Excel oder CSV", type=["xlsx", "xls", "csv"])
     bank_pdf = st.file_uploader("2) Bank PDF optional", type=["pdf"])
     st.divider()
     show_rows = st.number_input("Max Zeilen Tabellen", min_value=50, max_value=2000, value=300, step=50)
@@ -682,7 +667,7 @@ else:
     dq_badge = badge_html("bad", f"Datenqualität {dq_score}/100")
 
 # =========================================================
-# TOP BAR
+# HEADER BAR
 # =========================================================
 mandant_name = "Mandant"
 if sel_customers and len(sel_customers) == 1 and sel_customers[0].strip():
@@ -722,27 +707,18 @@ render_kpis(
 )
 
 # =========================================================
-# SANITY CHECKS (WOW, verhindert Bauchlandung)
+# SANITY CHECKS (WOW)
 # =========================================================
 with st.expander("Sanity Checks CFO", expanded=False):
     st.markdown("### Top 20 Ausreißer Beträge")
-    st.dataframe(df_for_display(f.sort_values("Betrag", ascending=False).head(20), money_cols=["Betrag"], date_cols=["RE_Datum","Faellig","Gezahlt_Am"]), width="stretch")
-
-    st.markdown("### Plausibilitätsampel")
-    ampel = []
-    if rev > 100_000_000:
-        ampel.append(("Rot", "Umsatz sehr hoch. Typisch: falsches Zahlenformat oder falsche Betrags Spalte gemappt."))
-    else:
-        ampel.append(("Grün", "Umsatz wirkt plausibel im Verhältnis zur Datengröße."))
-
-    if missing_faellig > 0:
-        ampel.append(("Gelb", f"{missing_faellig} offene Posten ohne Fälligkeit. Forecast wird ungenauer."))
-    if missing_kunde > 0:
-        ampel.append(("Gelb", f"{missing_kunde} Zeilen ohne Kunde."))
-    if missing_re > 0:
-        ampel.append(("Gelb", f"{missing_re} Zeilen ohne RE Nummer."))
-
-    st.dataframe(pd.DataFrame(ampel, columns=["Status", "Hinweis"]), width="stretch")
+    st.dataframe(
+        df_for_display(
+            f.sort_values("Betrag", ascending=False).head(20),
+            money_cols=["Betrag"],
+            date_cols=["RE_Datum", "Faellig", "Gezahlt_Am"],
+        ),
+        width="stretch",
+    )
 
 # =========================================================
 # CFO CHARTS
@@ -791,15 +767,13 @@ with cC3:
         st.plotly_chart(fig, width="stretch")
 
 # =========================================================
-# DRILLDOWN TABLES
+# TABLES
 # =========================================================
 st.divider()
 st.markdown("## Offene Posten Übersicht")
 
 tabs = st.tabs(["Offen", "Überfällig", "Überfällig > 60", "Alle Belege"])
-
 cols_show = ["Kunde", "RE_Nr", "RE_Datum", "Faellig", "Betrag", "Gezahlt_Am", "VerzugTage", "Aging"]
-cols_show = [c for c in cols_show if c in f.columns or c in offen.columns]
 
 with tabs[0]:
     st.dataframe(
@@ -928,10 +902,3 @@ else:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
-
-# =========================================================
-# DEBUG
-# =========================================================
-with st.expander("Import Debug Ansicht", expanded=False):
-    st.write(f"Quelle: {sheet_used} | Header Zeile: {header_row_used} | Zeilen: {len(df_norm)} | Spalten: {len(df_norm.columns)}")
-    st.dataframe(df_for_display(df_norm.head(50)), width="stretch")
