@@ -53,12 +53,23 @@ def parse_money(s: pd.Series) -> pd.Series:
     return pd.to_numeric(x, errors="coerce")
 
 def parse_date(s: pd.Series) -> pd.Series:
+    """
+    Date parser ohne dayfirst Konflikte:
+    - erkennt ISO (YYYY-MM-DD / YYYY-MM-DD HH:MM:SS) und parsed mit dayfirst=False
+    - erkennt deutsches Punktformat und parsed mit festem Format
+    - fallback dayfirst=True
+    """
     if pd.api.types.is_datetime64_any_dtype(s):
         return pd.to_datetime(s, errors="coerce")
+
     x = s.astype(str).str.strip()
 
     sample = x.dropna().head(50)
+    iso_ratio = sample.str.match(r"^\d{4}-\d{2}-\d{2}(\s+\d{2}:\d{2}:\d{2})?$").mean() if len(sample) else 0
     dot_ratio = sample.str.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}$").mean() if len(sample) else 0
+
+    if iso_ratio >= 0.5:
+        return pd.to_datetime(x, errors="coerce", dayfirst=False)
 
     if dot_ratio >= 0.5:
         dt = pd.to_datetime(x, format="%d.%m.%Y", errors="coerce")
@@ -84,6 +95,19 @@ def find_idx(cols, keys) -> int:
         if any(k in c_low for k in keys):
             return i
     return 0
+
+def make_arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Streamlit Arrow Crash Fix:
+    - object Spalten können mixed types enthalten
+    - Arrow versucht dann gern int64 und scheitert
+    Lösung: object Spalten deterministisch als pandas StringDtype
+    """
+    out = df.copy()
+    for c in out.columns:
+        if out[c].dtype == "object":
+            out[c] = out[c].astype("string")
+    return out
 
 # -----------------------------
 # 3) UPLOADS
@@ -128,10 +152,9 @@ except Exception as e:
 # -----------------------------
 with st.sidebar:
     st.subheader("📍 Mapping")
-
     c_dat = st.selectbox("Rechnungsdatum", cols, index=find_idx(cols, ["datum", "belegdat"]))
     c_fae = st.selectbox("Fälligkeit", cols, index=find_idx(cols, ["fällig", "faellig", "termin"]))
-    c_nr  = st.selectbox("RE Nummer", cols, index=find_idx(cols, ["nummer", "belegfeld", "rechnung", "beleg"]))
+    c_nr  = st.selectbox("RE Nummer", cols, index=find_idx(cols, ["nummer", "belegfeld", "rechnung", "beleg", "re-nr", "re nr"]))
     c_kun = st.selectbox("Kunde", cols, index=find_idx(cols, ["kunde", "name", "debitor"]))
     c_bet = st.selectbox("Betrag", cols, index=find_idx(cols, ["brutto", "betrag", "umsatz", "summe"]))
     c_pay = st.selectbox("Zahldatum", cols, index=find_idx(cols, ["gezahlt", "ausgleich", "eingang", "zahlung"]))
@@ -142,12 +165,20 @@ df[c_fae] = parse_date(df[c_fae])
 df[c_pay] = parse_date(df[c_pay])
 df[c_bet] = parse_money(df[c_bet])
 
-df["Fällig_Text"] = df[c_fae].astype(str).fillna("")
+# Anzeige Text (Arrow safe)
+df["Fällig_Text"] = df[c_fae].astype("string").fillna("")
 
+# Mindestvalidierung
 df = df.dropna(subset=[c_dat, c_bet]).copy()
 if df.empty:
     st.error("Nach Bereinigung keine gültigen Datensätze übrig.")
     st.stop()
+
+# Kritische Spalten hart typisieren (Arrow Crash Fix)
+if c_nr in df.columns:
+    df[c_nr] = df[c_nr].astype("string")
+if c_kun in df.columns:
+    df[c_kun] = df[c_kun].astype("string")
 
 # -----------------------------
 # 6) FILTER
@@ -268,8 +299,9 @@ with tabs[1]:
         show_cols = [c_dat, "Fällig_Text", c_kun, c_nr, c_bet, "Verzug"]
         show_cols = [c for c in show_cols if c in df_offen.columns]
 
+        view = df_offen.sort_values("Verzug", ascending=False)[show_cols]
         st.dataframe(
-            df_offen.sort_values("Verzug", ascending=False)[show_cols],
+            make_arrow_safe(view),
             column_config={c_bet: st.column_config.NumberColumn(format="%.2f €")},
             width="stretch"
         )
@@ -309,7 +341,7 @@ with tabs[3]:
             st.success("Logik OK")
         else:
             st.error(f"Fehler: {len(err)} Zahlung vor Rechnung")
-            st.dataframe(err, width="stretch")
+            st.dataframe(make_arrow_safe(err), width="stretch")
 
     with l2:
         st.markdown("**Nummernkreis**")
@@ -347,7 +379,7 @@ with tabs[4]:
         try:
             df_bank = pd.read_csv(bank_file, sep=None, engine="python")
             st.success("Bankdaten geladen.")
-            st.dataframe(df_bank.head(100), width="stretch")
+            st.dataframe(make_arrow_safe(df_bank.head(100)), width="stretch")
         except Exception as e:
             st.error("Fehler beim Lesen der Bank CSV")
             st.exception(e)
