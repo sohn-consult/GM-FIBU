@@ -8,6 +8,13 @@ import re
 import warnings
 
 # -----------------------------
+# 0) WARNINGS HARDENING
+# Wenn eure Runtime Warnings als Errors behandelt, stirbt sonst der Prozess
+# -----------------------------
+warnings.filterwarnings("ignore", message="Could not infer format*", category=UserWarning)
+warnings.filterwarnings("ignore", message="Parsing dates in %Y-%m-%d %H:%M:%S*", category=UserWarning)
+
+# -----------------------------
 # 1) PAGE SETUP + DESIGN
 # -----------------------------
 st.set_page_config(page_title="Sohn Consult Executive BI", page_icon="👔", layout="wide")
@@ -38,27 +45,81 @@ st.markdown("---")
 # -----------------------------
 # 2) HELPERS
 # -----------------------------
+CORE_KEYS = {"kunde", "re-nr", "re nr", "re-nr.", "re nr.", "re-datum", "re datum", "fällig", "faellig", "gezahlt"}
+
+def make_unique_columns(cols):
+    seen = {}
+    out = []
+    for c in cols:
+        base = str(c).strip()
+        if base == "" or base.lower() == "nan":
+            base = "Spalte"
+        if base not in seen:
+            seen[base] = 1
+            out.append(base)
+        else:
+            seen[base] += 1
+            out.append(f"{base}_{seen[base]}")
+    return out
+
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
-    keep = [c for c in df.columns if "Unnamed" not in c and c not in ("", "nan", "None")]
-    df = df[keep].copy()
+    # Unnamed wird NICHT blind entfernt, weil in deinem File wichtige Spalten dort hängen
     df.dropna(how="all", inplace=True)
     return df
+
+def promote_header_if_needed(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Wenn die erste Zeile die echten Header enthält (z. B. Kunde, RE-Nr., RE-Datum),
+    setzen wir die als Spaltennamen.
+    """
+    if df.empty:
+        return df
+
+    row0 = df.iloc[0].astype(str).str.strip()
+    tokens = set([t.lower() for t in row0.tolist() if t and t.lower() != "nan"])
+
+    # Heuristik: mindestens 2 Kernbegriffe
+    hit = sum(any(k in token for k in ["kunde", "re-nr", "re nr", "re-datum", "re datum", "fällig", "faellig", "gezahlt"])
+              for token in tokens)
+
+    if hit >= 2:
+        new_cols = make_unique_columns(row0.tolist())
+        df2 = df.iloc[1:].copy()
+        df2.columns = new_cols
+        # Häufig ist Zeile 1 komplett leer -> entfernen
+        df2.dropna(how="all", inplace=True)
+        return df2
+
+    return df
+
+def make_arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Arrow Crash Fix: object Spalten deterministisch stringen.
+    """
+    out = df.copy()
+    for c in out.columns:
+        if out[c].dtype == "object":
+            out[c] = out[c].astype("string")
+    return out
 
 def parse_money(s: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(s):
         return pd.to_numeric(s, errors="coerce")
     x = s.astype(str).str.strip()
     x = x.str.replace("€", "", regex=False).str.replace(" ", "", regex=False)
+    # DE Tausenderpunkt entfernen, Dezimalkomma zu Punkt
     x = x.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
     return pd.to_numeric(x, errors="coerce")
 
-def parse_date(s: pd.Series) -> pd.Series:
+def parse_date_strict(s: pd.Series) -> pd.Series:
     """
-    Warnungsfreies Datum Parsing:
-    - niemals "infer format" auslösen
-    - explizite Formate für die häufigsten Muster
-    - exotische Fälle: silent fallback (Warnungen werden geschluckt)
+    Warnungsfreies Parsing:
+    - ISO DateTime: YYYY-MM-DD HH:MM:SS
+    - ISO Date: YYYY-MM-DD
+    - DE: DD.MM.YYYY
+    - Sonst: NaT (keine Inference, keine Warnung)
     """
     if pd.api.types.is_datetime64_any_dtype(s):
         return pd.to_datetime(s, errors="coerce")
@@ -66,42 +127,18 @@ def parse_date(s: pd.Series) -> pd.Series:
     x = s.astype(str).str.strip()
     x = x.replace({"": np.nan, "nan": np.nan, "None": np.nan})
 
-    # Muster
-    iso_dt = x.str.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$", na=False)
-    iso_d  = x.str.match(r"^\d{4}-\d{2}-\d{2}$", na=False)
-    dot_d  = x.str.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}$", na=False)
-    slash_d = x.str.match(r"^\d{1,2}/\d{1,2}/\d{2,4}$", na=False)
-    dash_d = x.str.match(r"^\d{1,2}-\d{1,2}-\d{2,4}$", na=False)
-
     out = pd.Series(pd.NaT, index=x.index, dtype="datetime64[ns]")
 
-    # ISO datetime
+    iso_dt = x.str.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$", na=False)
+    iso_d  = x.str.match(r"^\d{4}-\d{2}-\d{2}$", na=False)
+    de_dot = x.str.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}$", na=False)
+
     if iso_dt.any():
         out.loc[iso_dt] = pd.to_datetime(x.loc[iso_dt], format="%Y-%m-%d %H:%M:%S", errors="coerce")
-
-    # ISO date
     if iso_d.any():
         out.loc[iso_d] = pd.to_datetime(x.loc[iso_d], format="%Y-%m-%d", errors="coerce")
-
-    # DE dot date: 12.01.2026
-    if dot_d.any():
-        # akzeptiert auch 2-stellige Jahre schlecht, aber coerced
-        out.loc[dot_d] = pd.to_datetime(x.loc[dot_d], format="%d.%m.%Y", errors="coerce")
-
-    # Slash date: 12/01/2026 -> hier unterstellen wir dayfirst (DE Logik)
-    if slash_d.any():
-        out.loc[slash_d] = pd.to_datetime(x.loc[slash_d], format="%d/%m/%Y", errors="coerce")
-
-    # Dash date: 12-01-2026 -> dayfirst (DE Logik)
-    if dash_d.any():
-        out.loc[dash_d] = pd.to_datetime(x.loc[dash_d], format="%d-%m-%Y", errors="coerce")
-
-    # Rest: letzter Fallback, aber Warnungen unterdrücken (wichtig, wenn Warnungen als Fehler laufen)
-    rest = out.isna() & x.notna()
-    if rest.any():
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=UserWarning)
-            out.loc[rest] = pd.to_datetime(x.loc[rest], errors="coerce")
+    if de_dot.any():
+        out.loc[de_dot] = pd.to_datetime(x.loc[de_dot], format="%d.%m.%Y", errors="coerce")
 
     return out
 
@@ -123,13 +160,6 @@ def find_idx(cols, keys) -> int:
             return i
     return 0
 
-def make_arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    for c in out.columns:
-        if out[c].dtype == "object":
-            out[c] = out[c].astype("string")
-    return out
-
 # -----------------------------
 # 3) UPLOADS
 # -----------------------------
@@ -150,6 +180,7 @@ with st.sidebar:
     st.header("⚙️ Konfiguration")
     mode = st.radio("Format", ["Standard Excel CSV", "DATEV Export"])
     header_row = st.number_input("Header Zeile", min_value=1, value=3)
+    auto_header = st.toggle("Auto Header Erkennung", value=True)
 
 try:
     if mode == "DATEV Export":
@@ -159,47 +190,84 @@ try:
         if fibu_file.name.lower().endswith(".csv"):
             df_raw = pd.read_csv(fibu_file, sep=None, engine="python")
         else:
+            # erst wie konfiguriert lesen, danach ggf. auto-header promoten
             df_raw = pd.read_excel(fibu_file, header=int(header_row - 1))
 
     df = clean_dataframe(df_raw)
-    cols = df.columns.tolist()
+
+    # Bei deinem Debitoren File ist die echte Header-Zeile oft im ersten Datensatz
+    if auto_header:
+        df = promote_header_if_needed(df)
+
+    # Spalten sauber machen
+    df.columns = make_unique_columns(df.columns.tolist())
+
 except Exception as e:
     st.error("Import fehlgeschlagen.")
     st.exception(e)
     st.stop()
 
+if df.empty:
+    st.error("Leere Datei oder keine verwertbaren Daten.")
+    st.stop()
+
+cols = df.columns.tolist()
+
 # -----------------------------
-# 5) MAPPING + NORMALISIERUNG
+# 5) DIAGNOSE PANEL (hilft bei Sonderformaten)
+# -----------------------------
+with st.expander("🧪 Diagnose: Import Struktur", expanded=False):
+    st.write("Erste Zeilen nach Import und Header Normalisierung:")
+    st.dataframe(make_arrow_safe(df.head(15)), width="stretch")
+    st.write("Spalten und Dtypes:")
+    dtypes_view = pd.DataFrame({"Spalte": df.columns, "dtype": [str(df[c].dtype) for c in df.columns]})
+    st.dataframe(make_arrow_safe(dtypes_view), width="stretch")
+
+# -----------------------------
+# 6) MAPPING
 # -----------------------------
 with st.sidebar:
     st.subheader("📍 Mapping")
-    c_dat = st.selectbox("Rechnungsdatum", cols, index=find_idx(cols, ["datum", "belegdat"]))
-    c_fae = st.selectbox("Fälligkeit", cols, index=find_idx(cols, ["fällig", "faellig", "termin"]))
-    c_nr  = st.selectbox("RE Nummer", cols, index=find_idx(cols, ["nummer", "belegfeld", "rechnung", "beleg", "re-nr", "re nr"]))
-    c_kun = st.selectbox("Kunde", cols, index=find_idx(cols, ["kunde", "name", "debitor"]))
-    c_bet = st.selectbox("Betrag", cols, index=find_idx(cols, ["brutto", "betrag", "umsatz", "summe"]))
-    c_pay = st.selectbox("Zahldatum", cols, index=find_idx(cols, ["gezahlt", "ausgleich", "eingang", "zahlung"]))
 
-df[c_dat] = parse_date(df[c_dat])
-df[c_fae] = parse_date(df[c_fae])
-df[c_pay] = parse_date(df[c_pay])
+    c_dat = st.selectbox("Rechnungsdatum", cols, index=find_idx(cols, ["re-datum", "re datum", "datum"]))
+    c_fae = st.selectbox("Fälligkeit", cols, index=find_idx(cols, ["fällig", "faellig", "termin"]))
+    c_nr  = st.selectbox("RE Nummer", cols, index=find_idx(cols, ["re-nr", "re nr", "nummer", "beleg"]))
+    c_kun = st.selectbox("Kunde", cols, index=find_idx(cols, ["kunde", "name", "debitor"]))
+    # Betrag: bevorzugt brutto, sonst netto, sonst "betrag"
+    c_bet = st.selectbox("Betrag", cols, index=find_idx(cols, ["betrag (brutto)", "brutto", "betrag", "netto", "umsatz", "summe"]))
+    c_pay = st.selectbox("Zahldatum", cols, index=find_idx(cols, ["gezahlt", "eingang", "zahlung", "ausgleich"]))
+
+# -----------------------------
+# 7) NORMALISIERUNG (Typen stabil)
+# -----------------------------
+# Textkopie der Fälligkeit für Anzeige
+faellig_text = df[c_fae].astype("string") if c_fae in df.columns else pd.Series([""] * len(df), dtype="string")
+df["Fällig_Text"] = faellig_text.fillna("")
+
+# Datum Felder strikt parsen
+df[c_dat] = parse_date_strict(df[c_dat])
+df[c_pay] = parse_date_strict(df[c_pay])
+
+# Fälligkeit: "sofort" bleibt Text, Datum wird streng geparsed
+df["_Fällig_Datum"] = parse_date_strict(df[c_fae]) if c_fae in df.columns else pd.Series(pd.NaT, index=df.index)
+
+# Betrag robust parsen
 df[c_bet] = parse_money(df[c_bet])
 
-df["Fällig_Text"] = df[c_fae].astype("string").fillna("")
-
-df = df.dropna(subset=[c_dat, c_bet]).copy()
-if df.empty:
-    st.error("Nach Bereinigung keine gültigen Datensätze übrig.")
-    st.stop()
-
-# Arrow kritische Spalten fix typisieren
+# Kritische Spalten als String (Arrow Safety)
 if c_nr in df.columns:
     df[c_nr] = df[c_nr].astype("string")
 if c_kun in df.columns:
     df[c_kun] = df[c_kun].astype("string")
 
+# Mindestvalidierung
+df = df.dropna(subset=[c_dat, c_bet]).copy()
+if df.empty:
+    st.error("Nach Bereinigung keine gültigen Datensätze: Rechnungsdatum oder Betrag fehlen.")
+    st.stop()
+
 # -----------------------------
-# 6) FILTER
+# 8) FILTER
 # -----------------------------
 with st.sidebar:
     st.markdown("### 🔍 Filter")
@@ -238,7 +306,7 @@ if f_df.empty:
 
 today = pd.Timestamp(datetime.now().date())
 df_offen = f_df[f_df[c_pay].isna()].copy()
-df_paid = f_df[~f_df[c_pay].isna()].copy()
+df_paid  = f_df[~f_df[c_pay].isna()].copy()
 
 tabs = st.tabs(["📊 Performance", "🔴 Forderungen", "💎 Strategie", "🔍 Forensik", "🏦 Bank"])
 
@@ -278,10 +346,11 @@ with tabs[1]:
     if df_offen.empty:
         st.info("Keine offenen Posten im Filter.")
     else:
+        # Verzug: nur wenn Fälligkeitsdatum vorhanden, sonst NaN
         df_offen["Verzug"] = np.where(
-            df_offen[c_fae].isna(),
+            df_offen["_Fällig_Datum"].isna(),
             np.nan,
-            (today - df_offen[c_fae]).dt.days
+            (today - df_offen["_Fällig_Datum"]).dt.days
         )
 
         def bucket(d):
@@ -300,8 +369,8 @@ with tabs[1]:
 
         with c2:
             df_pred = (
-                df_offen.dropna(subset=[c_fae])
-                .groupby(c_fae, as_index=False)[c_bet]
+                df_offen.dropna(subset=["_Fällig_Datum"])
+                .groupby("_Fällig_Datum", as_index=False)[c_bet]
                 .sum()
             )
             if df_pred.empty:
@@ -309,14 +378,14 @@ with tabs[1]:
             else:
                 df_pred["Size"] = df_pred[c_bet].abs().clip(lower=0.1)
                 st.plotly_chart(
-                    px.scatter(df_pred, x=c_fae, y=c_bet, size="Size", title="Cash Inflow Prognose"),
+                    px.scatter(df_pred, x="_Fällig_Datum", y=c_bet, size="Size", title="Cash Inflow Prognose"),
                     width="stretch"
                 )
 
         show_cols = [c_dat, "Fällig_Text", c_kun, c_nr, c_bet, "Verzug"]
         show_cols = [c for c in show_cols if c in df_offen.columns]
-
         view = df_offen.sort_values("Verzug", ascending=False)[show_cols]
+
         st.dataframe(
             make_arrow_safe(view),
             column_config={c_bet: st.column_config.NumberColumn(format="%.2f €")},
