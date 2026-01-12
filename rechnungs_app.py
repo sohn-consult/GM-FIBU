@@ -92,8 +92,11 @@ st.markdown(
 )
 
 # =========================================================
-# FORMATTING
+# HELPERS
 # =========================================================
+def existing_cols(df: pd.DataFrame, wanted: list[str]) -> list[str]:
+    return [c for c in wanted if c in df.columns]
+
 def format_date_de(x) -> str:
     if x is None or pd.isna(x):
         return ""
@@ -167,7 +170,7 @@ def render_kpis(items: list[dict]):
     st.markdown(f'<div class="kpiGrid">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 # =========================================================
-# PARSERS (ROBUST)
+# PARSERS
 # =========================================================
 def make_unique_columns(cols: list) -> list:
     seen = {}
@@ -185,12 +188,6 @@ def make_unique_columns(cols: list) -> list:
     return out
 
 def to_number_series(s: pd.Series) -> pd.Series:
-    """
-    Robustes Geld Parsing:
-    - Deutsch: 1.234,56
-    - International: 1234.56 oder 1,234.56
-    - Gemischt: entscheidet nach letzter Trennstelle
-    """
     if pd.api.types.is_numeric_dtype(s):
         return pd.to_numeric(s, errors="coerce")
 
@@ -593,11 +590,10 @@ if sel_customers:
     f = f[f["Kunde"].isin(sel_customers)].copy().reset_index(drop=True)
 
 today = pd.Timestamp(date.today())
-f["Offen"] = f["Gezahlt_Am"].isna()
-offen = f[f["Offen"]].copy().reset_index(drop=True)
-bezahlt = f[~f["Offen"]].copy().reset_index(drop=True)
 
-offen["VerzugTage"] = np.where(offen["Faellig"].notna(), (today - offen["Faellig"]).dt.days, np.nan)
+# Diese Spalten in f erzeugen, damit Tabellen nie auseinanderlaufen
+f["Offen"] = f["Gezahlt_Am"].isna()
+f["VerzugTage"] = np.where(f["Faellig"].notna(), (today - f["Faellig"]).dt.days, np.nan)
 
 def aging_bucket(v):
     if pd.isna(v):
@@ -610,7 +606,10 @@ def aging_bucket(v):
         return "31 bis 60"
     return "größer 60"
 
-offen["Aging"] = offen["VerzugTage"].apply(aging_bucket)
+f["Aging"] = f["VerzugTage"].apply(aging_bucket)
+
+offen = f[f["Offen"]].copy().reset_index(drop=True)
+bezahlt = f[~f["Offen"]].copy().reset_index(drop=True)
 
 rev = float(f["Betrag"].sum())
 op_sum = float(offen["Betrag"].sum()) if not offen.empty else 0.0
@@ -707,7 +706,7 @@ render_kpis(
 )
 
 # =========================================================
-# SANITY CHECKS (WOW)
+# SANITY CHECKS
 # =========================================================
 with st.expander("Sanity Checks CFO", expanded=False):
     st.markdown("### Top 20 Ausreißer Beträge")
@@ -767,37 +766,44 @@ with cC3:
         st.plotly_chart(fig, width="stretch")
 
 # =========================================================
-# TABLES
+# TABLES (CRASH PROOF)
 # =========================================================
 st.divider()
 st.markdown("## Offene Posten Übersicht")
 
 tabs = st.tabs(["Offen", "Überfällig", "Überfällig > 60", "Alle Belege"])
-cols_show = ["Kunde", "RE_Nr", "RE_Datum", "Faellig", "Betrag", "Gezahlt_Am", "VerzugTage", "Aging"]
+
+cols_show_base = ["Kunde", "RE_Nr", "RE_Datum", "Faellig", "Betrag", "Gezahlt_Am", "VerzugTage", "Aging"]
+date_cols = ["RE_Datum", "Faellig", "Gezahlt_Am"]
+money_cols = ["Betrag"]
 
 with tabs[0]:
+    show = existing_cols(offen, cols_show_base)
     st.dataframe(
-        df_for_display(offen[cols_show].head(int(show_rows)), money_cols=["Betrag"], date_cols=["RE_Datum", "Faellig", "Gezahlt_Am"]),
+        df_for_display(offen[show].head(int(show_rows)), money_cols=money_cols, date_cols=existing_cols(offen, date_cols)),
         width="stretch",
     )
 
 with tabs[1]:
     ov = offen.loc[offen["VerzugTage"] > 0].copy()
+    show = existing_cols(ov, cols_show_base)
     st.dataframe(
-        df_for_display(ov[cols_show].head(int(show_rows)), money_cols=["Betrag"], date_cols=["RE_Datum", "Faellig", "Gezahlt_Am"]),
+        df_for_display(ov[show].head(int(show_rows)), money_cols=money_cols, date_cols=existing_cols(ov, date_cols)),
         width="stretch",
     )
 
 with tabs[2]:
     gt = offen.loc[offen["VerzugTage"] > 60].copy()
+    show = existing_cols(gt, cols_show_base)
     st.dataframe(
-        df_for_display(gt[cols_show].head(int(show_rows)), money_cols=["Betrag"], date_cols=["RE_Datum", "Faellig", "Gezahlt_Am"]),
+        df_for_display(gt[show].head(int(show_rows)), money_cols=money_cols, date_cols=existing_cols(gt, date_cols)),
         width="stretch",
     )
 
 with tabs[3]:
+    show = existing_cols(f, cols_show_base)
     st.dataframe(
-        df_for_display(f[cols_show].head(int(show_rows)), money_cols=["Betrag"], date_cols=["RE_Datum", "Faellig", "Gezahlt_Am"]),
+        df_for_display(f[show].head(int(show_rows)), money_cols=money_cols, date_cols=existing_cols(f, date_cols)),
         width="stretch",
     )
 
@@ -808,10 +814,12 @@ st.divider()
 st.markdown("## Exporte")
 
 e1, e2, e3 = st.columns([1, 1, 1])
+show_export = existing_cols(offen, cols_show_base)
+
 with e1:
     st.download_button(
         "Export OP Liste Excel",
-        data=to_excel_bytes(offen[cols_show], sheet_name="OP"),
+        data=to_excel_bytes(offen[show_export], sheet_name="OP"),
         file_name="OP_Liste.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
@@ -826,9 +834,10 @@ with e2:
         use_container_width=True,
     )
 with e3:
+    base_cols = existing_cols(f, ["Kunde", "RE_Nr", "RE_Datum", "Faellig", "Betrag", "Gezahlt_Am"])
     st.download_button(
         "Export Belege Excel",
-        data=to_excel_bytes(f[["Kunde", "RE_Nr", "RE_Datum", "Faellig", "Betrag", "Gezahlt_Am"]], sheet_name="Belege"),
+        data=to_excel_bytes(f[base_cols], sheet_name="Belege"),
         file_name="Belege.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
@@ -869,9 +878,9 @@ else:
                 if matches.empty:
                     st.info("Keine Matches gefunden.")
                 else:
-                    mcols = [c for c in ["Buchung", "Betrag", "Gegenpartei", "RE_Nr", "Kunde", "Invoice_Betrag", "MatchType"] if c in matches.columns]
+                    mcols = existing_cols(matches, ["Buchung", "Betrag", "Gegenpartei", "RE_Nr", "Kunde", "Invoice_Betrag", "MatchType"])
                     st.dataframe(
-                        df_for_display(matches[mcols].head(int(show_rows)), money_cols=["Betrag", "Invoice_Betrag"], date_cols=["Buchung"]),
+                        df_for_display(matches[mcols].head(int(show_rows)), money_cols=["Betrag", "Invoice_Betrag"], date_cols=existing_cols(matches, ["Buchung"])),
                         width="stretch",
                     )
             with b2:
@@ -879,9 +888,9 @@ else:
                 if unmatched.empty:
                     st.success("Keine Unmatched Eingänge.")
                 else:
-                    ucols = [c for c in ["Buchung", "Betrag", "Gegenpartei", "Verwendungszweck"] if c in unmatched.columns]
+                    ucols = existing_cols(unmatched, ["Buchung", "Betrag", "Gegenpartei", "Verwendungszweck"])
                     st.dataframe(
-                        df_for_display(unmatched[ucols].head(int(show_rows)), money_cols=["Betrag"], date_cols=["Buchung"]),
+                        df_for_display(unmatched[ucols].head(int(show_rows)), money_cols=["Betrag"], date_cols=existing_cols(unmatched, ["Buchung"])),
                         width="stretch",
                     )
 
