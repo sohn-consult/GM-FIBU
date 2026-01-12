@@ -6,30 +6,22 @@ from datetime import datetime
 import numpy as np
 import re
 
-# --- 1. DESIGN & KONFIGURATION ---
+# --- 1. DESIGN & KONFIGURATION (Update 2026) ---
 st.set_page_config(page_title="Sohn-Consult | Executive BI", page_icon="👔", layout="wide")
 
 st.markdown("""
     <style>
     .stApp { background-color: #F8FAFC; }
     [data-testid="stSidebar"] { background-color: #F1F5F9; border-right: 1px solid #CBD5E1; }
-    [data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] label { 
-        color: #0F172A !important; font-weight: 600 !important; 
-    }
+    [data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] label { color: #0F172A !important; font-weight: 600 !important; }
     h1, h2, h3 { color: #1E3A8A; font-family: 'Inter', sans-serif; font-weight: 700; }
-    .stMetric { 
-        background-color: #FFFFFF; padding: 20px; border-radius: 12px; 
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-top: 5px solid #1E3A8A; 
-    }
-    .stButton>button { 
-        background-color: #1E3A8A; color: white; border-radius: 8px; 
-        font-weight: bold; width: 100%; height: 3.5em; 
-    }
+    .stMetric { background-color: #FFFFFF; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-top: 5px solid #1E3A8A; }
+    .stButton>button { background-color: #1E3A8A; color: white; border-radius: 8px; font-weight: bold; width: 100%; height: 3.5em; }
     .stTabs [aria-selected="true"] { background-color: #1E3A8A !important; color: white !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# Hilfsfunktionen für Währung und Export
+# Hilfsfunktionen
 def format_euro(val):
     if pd.isna(val) or val is None: return "0,00 €"
     return f"{val:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -41,7 +33,7 @@ def to_excel(df):
     return output.getvalue()
 
 st.title("👔 Sohn-Consult | Strategic BI Dashboard")
-st.caption("Forensic, Strategic Reporting & Cashflow - Stabile Version 2026")
+st.caption("Stabilisierte Version: Performance, Forensic, Bank & Cashflow")
 st.markdown("---")
 
 # --- 2. MULTI-UPLOAD BEREICH ---
@@ -67,7 +59,7 @@ if fibu_file:
                 else:
                     df_raw = pd.read_excel(fibu_file, header=header_row-1)
             
-            # STABILITÄT: Alle Spaltennamen in Strings umwandeln (Fix für Arrow-Fehler) 
+            # --- STABILITÄTS-FIX: Spaltennamen & Arrow-Compatibility ---
             df_raw.columns = [str(c).strip() for c in df_raw.columns]
             cols = [c for c in df_raw.columns if "Unnamed" not in c and c != "nan"]
             df_work = df_raw[cols].dropna(how='all', axis=0).copy()
@@ -85,9 +77,9 @@ if fibu_file:
             c_bet = st.selectbox("Betrag", cols, index=find_idx(["brutto", "betrag", "umsatz"]))
             c_pay = st.selectbox("Zahldatum", cols, index=find_idx(["gezahlt", "ausgleich", "eingang"]))
 
-            # Transformation & Bereinigung [cite: 79, 114, 291]
+            # Transformation & Bereinigung
             df_work[c_dat] = pd.to_datetime(df_work[c_dat], errors='coerce')
-            df_work['Fällig_Display'] = df_work[c_fae].astype(str) # Original-Strings behalten
+            df_work['Fällig_Display'] = df_work[c_fae].astype(str) 
             df_work[c_fae] = pd.to_datetime(df_work[c_fae], errors='coerce')
             df_work[c_pay] = pd.to_datetime(df_work[c_pay], errors='coerce')
             
@@ -103,16 +95,14 @@ if fibu_file:
             min_d, max_d = df_work[c_dat].min().date(), df_work[c_dat].max().date()
             date_range = st.date_input("Zeitraum", [min_d, max_d])
 
-            start_btn = st.button("🚀 ANALYSE STARTEN", use_container_width=True)
+            start_btn = st.button("🚀 ANALYSE STARTEN", width='stretch')
 
         except Exception as e:
             st.error(f"Fehler beim Laden: {e}")
             start_btn = False
 
     if start_btn and len(date_range) == 2:
-        mask = (df_work[c_dat].dt.date >= date_range[0]) & \
-               (df_work[c_dat].dt.date <= date_range[1]) & \
-               (df_work[c_kun].isin(sel_kunden))
+        mask = (df_work[c_dat].dt.date >= date_range[0]) & (df_work[c_dat].dt.date <= date_range[1]) & (df_work[c_kun].isin(sel_kunden))
         f_df = df_work[mask].copy()
 
         today = pd.Timestamp(datetime.now().date())
@@ -120,17 +110,16 @@ if fibu_file:
         df_offen = f_df[offen_mask].copy()
         df_paid = f_df[~offen_mask].copy()
 
-        tabs = st.tabs(["📊 Performance", "🔴 Aging & Offene Posten", "💎 Strategie & Risiko", "🔍 Forensik", "🏦 Bank-Match"])
+        tabs = st.tabs(["📊 Performance", "🔴 Aging & OP", "💎 Strategie", "🔍 Forensik", "🏦 Bank-Match"])
 
-        # --- TAB 1: PERFORMANCE ---
         with tabs[0]:
             k1, k2, k3, k4 = st.columns(4)
             rev = f_df[c_bet].sum()
             k1.metric("Gesamtumsatz", format_euro(rev))
             k2.metric("Offene Posten", format_euro(df_offen[c_bet].sum()))
             
-            # DSO Berechnung mit Schutz gegen Division durch Null [cite: 109]
-            if not df_paid.empty:
+            # DSO mit Division-by-Zero Schutz
+            if not df_paid.empty and rev > 0:
                 dso = (df_paid[c_pay] - df_paid[c_dat]).dt.days.mean()
                 k3.metric("Ø Zahlungsdauer (DSO)", f"{dso:.1f} Tage")
             else:
@@ -146,7 +135,6 @@ if fibu_file:
                 f_df['Kumuliert'] = f_df[c_bet].cumsum()
                 st.plotly_chart(px.area(f_df, x=c_dat, y='Kumuliert', title="Wachstumspfad", color_discrete_sequence=['#3B82F6']), width='stretch')
 
-        # --- TAB 2: AGING & OFFENE POSTEN ---
         with tabs[1]:
             st.subheader("Forderungs-Management & Aging")
             col_a1, col_a2 = st.columns([1, 2])
@@ -162,28 +150,24 @@ if fibu_file:
                 st.plotly_chart(px.pie(df_offen.groupby('Bucket')[c_bet].sum().reset_index(), values=c_bet, names='Bucket', hole=0.5, title="Überfälligkeiten"), width='stretch')
             
             with col_a2:
-                # STABILITÄT: Scatter Plot Fix für negative Werte (Gutschriften) [cite: 188, 265]
+                # --- STABILITÄTS-FIX: Scatter Plot bei negativen Werten ---
                 df_predict = df_offen.groupby(c_fae)[c_bet].sum().reset_index()
                 if not df_predict.empty:
                     df_predict['Betrag_Abs'] = df_predict[c_bet].abs().clip(lower=0.1)
                     st.plotly_chart(px.scatter(df_predict, x=c_fae, y=c_bet, size='Betrag_Abs', title="Cashflow-Prognose", color_discrete_sequence=['#10B981']), width='stretch')
             
-            # STABILITÄT: Anzeige-Fix gegen ArrowTypeError 
             disp_df = df_offen[[c_dat, c_fae, c_kun, c_bet, 'Verzug']].copy()
             disp_df[c_dat] = disp_df[c_dat].dt.strftime('%d.%m.%Y')
-            disp_df[c_fae] = df_offen['Fällig_Display']
+            disp_df[c_fae] = df_offen['Fällig_Display'].fillna("unbekannt")
             st.dataframe(disp_df.sort_values('Verzug', ascending=False), column_config={c_bet: st.column_config.NumberColumn(format="%.2f €")}, width='stretch')
-            st.download_button("📥 Excel-Liste exportieren", to_excel(df_offen), "Offene_Posten.xlsx")
 
-        # --- TAB 3: STRATEGIE & RISIKO ---
         with tabs[2]:
-            st.subheader("Strategische Analyse: ABC & Klumpenrisiko")
+            st.subheader("ABC-Analyse & Klumpenrisiko")
             abc = f_df.groupby(c_kun)[c_bet].sum().reset_index().sort_values(by=c_bet, ascending=False)
             st.plotly_chart(px.bar(abc.head(15), x=c_kun, y=c_bet, title="Top 15 Kundenumsätze", color_discrete_sequence=['#1E3A8A']), width='stretch')
             top3 = (abc[c_bet].head(3).sum() / rev) * 100 if rev > 0 else 0
             st.metric("Klumpenrisiko (Top 3 Kunden)", f"{top3:.1f}%")
 
-        # --- TAB 4: FORENSIK ---
         with tabs[3]:
             st.subheader("🔍 Forensik & Daten-Integrität")
             miss_count = f_df.isna().sum().sum()
@@ -214,9 +198,8 @@ if fibu_file:
                         else: st.success("✅ Nummernkreis lückenlos.")
                 except: st.info("ℹ️ Check nicht möglich.")
 
-        # --- TAB 5: BANK-MATCH ---
         with tabs[4]:
-            st.subheader("Bank-Reconciliation (Matching) [cite: 128]")
+            st.subheader("Bank-Reconciliation (Matching)")
             if bank_file:
                 df_bank = pd.read_csv(bank_file, sep=None, engine='python')
                 st.success("Bankdaten geladen.")
