@@ -6,10 +6,50 @@ from datetime import datetime
 import numpy as np
 import re
 
-# --- 1. DESIGN & KONFIGURATION ---
+# -----------------------------
+# 0) SAFE WRAPPER (Version Layer)
+# -----------------------------
+def safe_plotly(fig, **kwargs):
+    """
+    plotly_chart wrapper: use_container_width existiert nicht in allen Versionen gleich.
+    """
+    try:
+        st.plotly_chart(fig, use_container_width=True, **kwargs)
+    except TypeError:
+        st.plotly_chart(fig, **kwargs)
+
+def safe_dataframe(df, **kwargs):
+    """
+    dataframe wrapper: use_container_width existiert nicht in allen Versionen gleich.
+    """
+    try:
+        st.dataframe(df, use_container_width=True, **kwargs)
+    except TypeError:
+        st.dataframe(df, **kwargs)
+
+def safe_download_button(label, data, file_name, mime=None):
+    """
+    download_button wrapper: use_container_width existiert nicht überall.
+    """
+    try:
+        return st.download_button(label, data=data, file_name=file_name, mime=mime, use_container_width=True)
+    except TypeError:
+        return st.download_button(label, data=data, file_name=file_name, mime=mime)
+
+def safe_button(label, key=None):
+    """
+    button wrapper: use_container_width kann fehlen.
+    Dein CSS setzt ohnehin width:100%.
+    """
+    if key:
+        return st.button(label, key=key)
+    return st.button(label)
+
+# -----------------------------
+# 1) PAGE CONFIG + DESIGN
+# -----------------------------
 st.set_page_config(page_title="Sohn Consult Executive BI", page_icon="👔", layout="wide")
 
-# CSS für professionellen Look
 st.markdown(
     """
     <style>
@@ -29,47 +69,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- 2. HILFSFUNKTIONEN (STABILITY LAYER) ---
+# -----------------------------
+# 2) HELPERS
+# -----------------------------
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Bereinigt den DataFrame beim Import, um Abstürze durch
-    gemischte Spaltennamen oder leere Bereiche zu verhindern.
-    """
-    # Spaltennamen zu Strings erzwingen und bereinigen
     df.columns = [str(c).strip() for c in df.columns]
-
-    # Leere Spalten entfernen
     cols_to_keep = [c for c in df.columns if "Unnamed" not in c and c not in ("nan", "", "None")]
     df = df[cols_to_keep].copy()
-
-    # Komplett leere Zeilen löschen
     df.dropna(how="all", inplace=True)
     return df
-
 
 def format_euro(val) -> str:
     if pd.isna(val) or val is None:
         return "0,00 €"
     return f"{val:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
 
-
-def to_excel(df: pd.DataFrame) -> bytes:
-    output = BytesIO()
-    # openpyxl ist i.d.R. stabiler verfügbar als xlsxwriter
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Analyse")
-    return output.getvalue()
-
-
-def find_idx(cols, keys) -> int:
-    for i, c in enumerate(cols):
-        if any(k.lower() in str(c).lower() for k in keys):
-            return i
-    return 0
-
-
 def parse_money_series(s: pd.Series) -> pd.Series:
-    # robustes Parsing für typische DE Formate (1.234,56) sowie bereits numerische Werte
     if pd.api.types.is_numeric_dtype(s):
         return pd.to_numeric(s, errors="coerce")
     x = s.astype(str).str.strip()
@@ -77,13 +92,31 @@ def parse_money_series(s: pd.Series) -> pd.Series:
     x = x.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
     return pd.to_numeric(x, errors="coerce")
 
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    """
+    Engine nicht hart verdrahten: sonst knallt es bei fehlendem openpyxl oder xlsxwriter.
+    """
+    output = BytesIO()
+    with pd.ExcelWriter(output) as writer:  # pandas wählt verfügbare Engine
+        df.to_excel(writer, index=False, sheet_name="Analyse")
+    return output.getvalue()
 
-# --- 3. APP HEADER ---
+def find_idx(cols, keys) -> int:
+    for i, c in enumerate(cols):
+        if any(k.lower() in str(c).lower() for k in keys):
+            return i
+    return 0
+
+# -----------------------------
+# 3) HEADER
+# -----------------------------
 st.title("👔 Sohn Consult Strategic BI Dashboard")
 st.caption("Version 2026.9 Stable Core Forensic & Cashflow")
 st.markdown("---")
 
-# --- 4. DATA IMPORT ---
+# -----------------------------
+# 4) UPLOADS
+# -----------------------------
 col_u1, col_u2 = st.columns(2)
 with col_u1:
     fibu_file = st.file_uploader("📂 1. Fibu Datei laden (XLSX/CSV)", type=["xlsx", "csv"])
@@ -95,53 +128,54 @@ start_btn = False
 date_range = None
 sel_kunden = None
 
+# -----------------------------
+# 5) SIDEBAR CONFIG + IMPORT
+# -----------------------------
 if fibu_file:
     with st.sidebar:
         st.header("⚙️ Konfiguration")
         mode = st.radio("Format", ["Standard Excel CSV", "DATEV Export"])
         header_row = st.number_input("Header Zeile", min_value=1, value=3)
 
-        try:
-            # Einlesen
-            if mode == "DATEV Export":
-                content = fibu_file.getvalue().decode("latin-1", errors="ignore")
-                df_raw = pd.read_csv(StringIO(content), sep=None, engine="python", skiprows=1)
+        st.markdown("---")
+        st.subheader("🧯 Crash Log")
+        # Wenn Streamlit crasht, ist das oft schwer zu sehen. Hier zeigen wir Exceptions an.
+        # Wir sammeln keine Logs global, aber zeigen Exceptions im UI.
+
+    try:
+        if mode == "DATEV Export":
+            content = fibu_file.getvalue().decode("latin-1", errors="ignore")
+            df_raw = pd.read_csv(StringIO(content), sep=None, engine="python", skiprows=1)
+        else:
+            if fibu_file.name.lower().endswith(".csv"):
+                df_raw = pd.read_csv(fibu_file, sep=None, engine="python")
             else:
-                if fibu_file.name.lower().endswith(".csv"):
-                    df_raw = pd.read_csv(fibu_file, sep=None, engine="python")
-                else:
-                    df_raw = pd.read_excel(fibu_file, header=int(header_row - 1))
+                df_raw = pd.read_excel(fibu_file, header=int(header_row - 1))
 
-            # Bereinigung
-            df_work = clean_dataframe(df_raw)
-            cols = df_work.columns.tolist()
+        df_work = clean_dataframe(df_raw)
+        cols = df_work.columns.tolist()
 
+        with st.sidebar:
             st.subheader("📍 Mapping")
 
             c_dat = st.selectbox("Rechnungsdatum", cols, index=find_idx(cols, ["datum", "belegdat"]))
             c_fae = st.selectbox("Fälligkeit", cols, index=find_idx(cols, ["fällig", "faellig", "termin"]))
-            c_nr = st.selectbox("RE Nummer", cols, index=find_idx(cols, ["nummer", "belegfeld", "re", "rechnung"]))
+            c_nr  = st.selectbox("RE Nummer", cols, index=find_idx(cols, ["nummer", "belegfeld", "re", "rechnung"]))
             c_kun = st.selectbox("Kunde", cols, index=find_idx(cols, ["kunde", "name", "debitor"]))
             c_bet = st.selectbox("Betrag", cols, index=find_idx(cols, ["brutto", "betrag", "umsatz", "summe"]))
             c_pay = st.selectbox("Zahldatum", cols, index=find_idx(cols, ["gezahlt", "ausgleich", "eingang", "zahlung"]))
 
-            # Typ Handling
-            df_work[c_dat] = pd.to_datetime(df_work[c_dat], errors="coerce")
+        # TYP HANDLING
+        df_work[c_dat] = pd.to_datetime(df_work[c_dat], errors="coerce")
+        df_work["Fällig_Text"] = df_work[c_fae].astype(str).fillna("")
+        df_work[c_fae] = pd.to_datetime(df_work[c_fae], errors="coerce")
+        df_work[c_pay] = pd.to_datetime(df_work[c_pay], errors="coerce")
+        df_work[c_bet] = parse_money_series(df_work[c_bet])
 
-            # Text Kopie für Anzeige
-            df_work["Fällig_Text"] = df_work[c_fae].astype(str).fillna("")
+        # Mindestvalidierung
+        df_work = df_work.dropna(subset=[c_dat, c_bet]).copy()
 
-            # Echtes Datum für Rechnen
-            df_work[c_fae] = pd.to_datetime(df_work[c_fae], errors="coerce")
-            df_work[c_pay] = pd.to_datetime(df_work[c_pay], errors="coerce")
-
-            # Betrag robust parsen
-            df_work[c_bet] = parse_money_series(df_work[c_bet])
-
-            # Mindestvalidierung
-            df_work = df_work.dropna(subset=[c_dat, c_bet]).copy()
-
-            # FILTER
+        with st.sidebar:
             st.markdown("### 🔍 Filter")
 
             if c_kun in df_work.columns:
@@ -154,18 +188,21 @@ if fibu_file:
                 min_d = df_work[c_dat].min().date()
                 max_d = df_work[c_dat].max().date()
                 date_range = st.date_input("Zeitraum", [min_d, max_d])
-                start_btn = st.button("🚀 ANALYSE STARTEN", use_container_width=True)
+                start_btn = safe_button("🚀 ANALYSE STARTEN")
             else:
                 st.error("Keine gültigen Daten nach Import und Bereinigung.")
                 start_btn = False
 
-        except Exception as e:
-            st.error(f"Fehler beim Import oder Mapping: {e}")
-            start_btn = False
+    except Exception as e:
+        with st.sidebar:
+            st.error("Import oder Mapping Fehler")
+            st.exception(e)
+        df_work = None
 
-# --- 5. ANALYSE ---
+# -----------------------------
+# 6) ANALYSE
+# -----------------------------
 if df_work is not None and start_btn and date_range and len(date_range) == 2:
-    # Robuster Kunden Filter: wenn leer, dann kein Filter
     kunden_mask = df_work[c_kun].isin(sel_kunden) if sel_kunden else True
 
     mask = (
@@ -177,7 +214,7 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
 
     today = pd.Timestamp(datetime.now().date())
     df_offen = f_df[f_df[c_pay].isna()].copy()
-    df_paid = f_df[~f_df[c_pay].isna()].copy()
+    df_paid  = f_df[~f_df[c_pay].isna()].copy()
 
     tabs = st.tabs(["📊 Performance", "🔴 Forderungen", "💎 Strategie", "🔍 Forensik", "🏦 Bank"])
 
@@ -200,7 +237,7 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
                 f_df["Monat"] = f_df[c_dat].dt.strftime("%Y-%m")
                 mon_chart = f_df.groupby("Monat", as_index=False)[c_bet].sum()
                 fig_bar = px.bar(mon_chart, x="Monat", y=c_bet, title="Umsatz")
-                st.plotly_chart(fig_bar, use_container_width=True)
+                safe_plotly(fig_bar)
             else:
                 st.info("Keine Daten im gewählten Zeitraum.")
 
@@ -209,7 +246,7 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
                 f_sorted = f_df.sort_values(c_dat).copy()
                 f_sorted["Kumuliert"] = f_sorted[c_bet].cumsum()
                 fig_area = px.area(f_sorted, x=c_dat, y="Kumuliert", title="Wachstum")
-                st.plotly_chart(fig_area, use_container_width=True)
+                safe_plotly(fig_area)
             else:
                 st.info("Keine Daten für Wachstumskurve.")
 
@@ -219,7 +256,6 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
 
         c_op1, c_op2 = st.columns([1, 2])
 
-        # Verzug berechnen, NaT bleibt NaN
         if not df_offen.empty:
             df_offen["Verzug"] = np.where(
                 df_offen[c_fae].isna(),
@@ -230,14 +266,10 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
             df_offen["Verzug"] = pd.Series(dtype="float")
 
         def get_bucket(d):
-            if pd.isna(d):
-                return "Unbekannt"
-            if d <= 0:
-                return "1. Pünktlich"
-            if d <= 30:
-                return "2. 1-30 Tage"
-            if d <= 60:
-                return "3. 31-60 Tage"
+            if pd.isna(d): return "Unbekannt"
+            if d <= 0: return "1. Pünktlich"
+            if d <= 30: return "2. 1-30 Tage"
+            if d <= 60: return "3. 31-60 Tage"
             return "4. > 60 Tage"
 
         with c_op1:
@@ -245,13 +277,12 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
                 df_offen["Bucket"] = df_offen["Verzug"].apply(get_bucket)
                 pie_data = df_offen.groupby("Bucket", as_index=False)[c_bet].sum()
                 fig_pie = px.pie(pie_data, values=c_bet, names="Bucket", hole=0.5, title="Risiko")
-                st.plotly_chart(fig_pie, use_container_width=True)
+                safe_plotly(fig_pie)
             else:
                 st.info("Keine offenen Posten im gewählten Zeitraum.")
 
         with c_op2:
             if not df_offen.empty:
-                # Prognose nur auf echte Fälligkeitsdaten
                 df_predict = (
                     df_offen.dropna(subset=[c_fae])
                     .groupby(c_fae, as_index=False)[c_bet]
@@ -259,37 +290,28 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
                 )
                 if not df_predict.empty:
                     df_predict["Size_Safe"] = df_predict[c_bet].abs().clip(lower=0.1)
-                    fig_scat = px.scatter(
-                        df_predict,
-                        x=c_fae,
-                        y=c_bet,
-                        size="Size_Safe",
-                        title="Cash Inflow Prognose"
-                    )
-                    st.plotly_chart(fig_scat, use_container_width=True)
+                    fig_scat = px.scatter(df_predict, x=c_fae, y=c_bet, size="Size_Safe", title="Cash Inflow Prognose")
+                    safe_plotly(fig_scat)
                 else:
                     st.info("Keine offenen Posten mit Fälligkeit für Prognose.")
             else:
                 st.info("Keine offenen Posten für Prognose.")
 
-        # Tabelle mit sicherem Text Datum
         if not df_offen.empty:
+            show_cols = [c_dat, "Fällig_Text", c_kun, c_bet, "Verzug"]
             try:
-                show_cols = [c_dat, "Fällig_Text", c_kun, c_bet, "Verzug"]
-                st.dataframe(
+                safe_dataframe(
                     df_offen.sort_values("Verzug", ascending=False)[show_cols],
-                    column_config={c_bet: st.column_config.NumberColumn(format="%.2f €")},
-                    use_container_width=True
+                    column_config={c_bet: st.column_config.NumberColumn(format="%.2f €")}
                 )
             except Exception:
-                st.dataframe(df_offen, use_container_width=True)
+                safe_dataframe(df_offen)
 
-            st.download_button(
+            safe_download_button(
                 "📥 Excel OP Liste",
-                data=to_excel(df_offen),
+                data=to_excel_bytes(df_offen),
                 file_name="OP_Liste.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
             st.info("Keine Daten für OP Tabelle oder Export.")
@@ -297,7 +319,6 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
     # TAB 3: STRATEGIE
     with tabs[2]:
         st.subheader("ABC Analyse")
-
         if not f_df.empty and c_kun in f_df.columns:
             abc = (
                 f_df.groupby(c_kun, as_index=False)[c_bet]
@@ -305,7 +326,7 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
                 .sort_values(c_bet, ascending=False)
             )
             fig_abc = px.bar(abc.head(15), x=c_kun, y=c_bet, title="Top Kunden")
-            st.plotly_chart(fig_abc, use_container_width=True)
+            safe_plotly(fig_abc)
 
             top3_share = (abc[c_bet].head(3).sum() / rev * 100) if rev > 0 else 0
             st.metric("Klumpenrisiko Top 3", f"{top3_share:.1f}%")
@@ -315,7 +336,6 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
     # TAB 4: FORENSIK
     with tabs[3]:
         st.subheader("🔍 Forensik")
-
         l1, l2 = st.columns(2)
 
         with l1:
@@ -324,7 +344,7 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
                 err = f_df[(~f_df[c_pay].isna()) & (f_df[c_pay] < f_df[c_dat])]
                 if not err.empty:
                     st.error(f"Fehler: {len(err)} Zahlung vor Rechnung")
-                    st.dataframe(err, use_container_width=True)
+                    safe_dataframe(err)
                 else:
                     st.success("Logik OK")
             else:
@@ -362,11 +382,11 @@ if df_work is not None and start_btn and date_range and len(date_range) == 2:
             try:
                 df_bank = pd.read_csv(bank_file, sep=None, engine="python")
                 st.success("Bankdaten geladen.")
-                st.dataframe(df_bank.head(50), use_container_width=True)
+                safe_dataframe(df_bank.head(50))
             except Exception as e:
-                st.error(f"Fehler beim Lesen der Bank CSV: {e}")
+                st.error("Fehler beim Lesen der Bank CSV")
+                st.exception(e)
         else:
             st.info("Bitte Bank CSV laden.")
-
 else:
     st.info("👋 Bitte Datei laden und starten.")
