@@ -6,9 +6,10 @@ from datetime import datetime
 import numpy as np
 import re
 
-# --- 1. DESIGN & KONFIGURATION (Update 2026) ---
+# --- 1. DESIGN & KONFIGURATION ---
 st.set_page_config(page_title="Sohn-Consult | Executive BI", page_icon="👔", layout="wide")
 
+# Modernes Corporate Design mit hohem Kontrast für Berater
 st.markdown("""
     <style>
     .stApp { background-color: #F8FAFC; }
@@ -37,11 +38,11 @@ def format_euro(val):
 def to_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Sohn_Consult_Export')
+        df.to_excel(writer, index=False, sheet_name='Analyse_Export')
     return output.getvalue()
 
 st.title("👔 Sohn-Consult | Executive Strategy Dashboard")
-st.caption("Stabilisierte Version: Performance, Forensic, Bank & Cashflow")
+st.caption("Forensic, Strategic Reporting & Cashflow - Stabile Version 2026.4")
 st.markdown("---")
 
 # --- 2. MULTI-UPLOAD BEREICH ---
@@ -65,9 +66,9 @@ if fibu_file:
                 if fibu_file.name.endswith('.csv'):
                     df_raw = pd.read_csv(fibu_file, sep=None, engine='python')
                 else:
-                    df_raw = pd.read_excel(fibu_file, header=header_row-1)
+                    df_raw = pd.read_excel(fibu_file, header=int(header_row-1))
             
-            # STABILITÄTS-FIX: Spaltennamen bereinigen
+            # STABILITÄT: Alle Spaltennamen in Strings umwandeln (Fix für Arrow-Fehler)
             df_raw.columns = [str(c).strip() for c in df_raw.columns]
             cols = [c for c in df_raw.columns if "Unnamed" not in str(c) and str(c) != "nan"]
             df_work = df_raw[cols].dropna(how='all', axis=0).copy()
@@ -123,13 +124,12 @@ if fibu_file:
 
         tabs = st.tabs(["📊 Performance", "🔴 Aging & OP", "💎 Strategie", "🔍 Forensik", "🏦 Bank-Match"])
 
-        # TAB 1: Performance
+        # TAB 1: PERFORMANCE
         with tabs[0]:
             k1, k2, k3, k4 = st.columns(4)
             rev = f_df[c_bet].sum()
             k1.metric("Gesamtumsatz", format_euro(rev))
             k2.metric("Offene Posten", format_euro(df_offen[c_bet].sum()))
-            
             if not df_paid.empty:
                 dso = (df_paid[c_pay] - df_paid[c_dat]).dt.days.mean()
                 k3.metric("Ø Zahlungszeit", f"{dso:.1f} Tage")
@@ -146,7 +146,7 @@ if fibu_file:
                 f_df['Kumuliert'] = f_df[c_bet].cumsum()
                 st.plotly_chart(px.area(f_df, x=c_dat, y='Kumuliert', title="Wachstumspfad", color_discrete_sequence=['#3B82F6']), width='stretch')
 
-        # TAB 2: Aging & OP
+        # TAB 2: AGING & OFFENE POSTEN
         with tabs[1]:
             st.subheader("Forderungs-Management & Aging")
             col_a1, col_a2 = st.columns([1, 2])
@@ -162,7 +162,7 @@ if fibu_file:
                 st.plotly_chart(px.pie(df_offen.groupby('Bucket')[c_bet].sum().reset_index(), values=c_bet, names='Bucket', hole=0.5, title="Überfälligkeiten"), width='stretch')
             
             with col_a2:
-                # STABILITÄTS-FIX: Absoluter Wert für Scatter-Größe gegen ValueError
+                # STABILITÄTS-FIX: Scatter Plot bei negativen Werten (Gutschriften)
                 df_predict = df_offen.groupby(c_fae)[c_bet].sum().reset_index()
                 if not df_predict.empty:
                     df_predict['Betrag_Abs'] = df_predict[c_bet].abs().clip(lower=0.1)
@@ -175,15 +175,15 @@ if fibu_file:
             st.dataframe(disp_df.sort_values('Verzug', ascending=False), column_config={c_bet: st.column_config.NumberColumn(format="%.2f €")}, width='stretch')
             st.download_button("📥 Excel OP-Liste", to_excel(df_offen), "Offene_Posten.xlsx")
 
-        # TAB 3: Strategie
+        # TAB 3: STRATEGIE
         with tabs[2]:
             st.subheader("ABC-Analyse & Klumpenrisiko")
             abc = f_df.groupby(c_kun)[c_bet].sum().reset_index().sort_values(by=c_bet, ascending=False)
             st.plotly_chart(px.bar(abc.head(15), x=c_kun, y=c_bet, title="Top 15 Kundenumsätze", color_discrete_sequence=['#1E3A8A']), width='stretch')
             top3 = (abc[c_bet].head(3).sum() / rev) * 100 if rev > 0 else 0
-            st.metric("Klumpenrisiko (Top 3)", f"{top3:.1f}%")
+            st.metric("Klumpenrisiko (Top 3 Kunden)", f"{top3:.1f}%")
 
-        # TAB 4: Forensik
+        # TAB 4: FORENSIK
         with tabs[3]:
             st.subheader("🔍 Forensik & Daten-Integrität")
             miss_count = f_df.isna().sum().sum()
@@ -195,7 +195,7 @@ if fibu_file:
                 st.markdown("### Zeitliche Logik")
                 err = f_df[f_df[c_pay] < f_df[c_dat]]
                 if not err.empty:
-                    st.error(f"❌ {len(err)} Fehler: Zahlung vor Rechnung.")
+                    st.error(f"❌ {len(err)} Fehler: Zahlung vor Rechnungsdatum.")
                     st.dataframe(err[[c_dat, c_pay, c_kun, c_bet]])
                 else: st.success("✅ Datum-Logik einwandfrei.")
 
@@ -214,7 +214,7 @@ if fibu_file:
                         else: st.success("✅ Nummernkreis lückenlos.")
                 except: st.info("ℹ️ Check nicht möglich.")
 
-        # TAB 5: Bank-Match
+        # TAB 5: BANK-MATCH
         with tabs[4]:
             st.subheader("Bank-Reconciliation (Matching)")
             if bank_file:
