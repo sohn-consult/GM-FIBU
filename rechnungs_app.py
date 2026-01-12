@@ -6,119 +6,95 @@ from io import BytesIO
 # 1. Grundkonfiguration
 st.set_page_config(page_title="Sohn-Consult Auswertung Fibu", layout="wide")
 
-# Styling für ein professionelles Auftreten
-st.markdown("""
-    <style>
-    .main { background-color: #f8f9fa; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    </style>
-    """, unsafe_allow_html=True)
-
 st.title("📊 Sohn-Consult Auswertung Fibu")
-st.subheader("Finanzübersicht & Debitoren-Analyse 2025")
+st.markdown("---")
 
-# 2. Datei-Upload
-uploaded_file = st.file_uploader("Excel-Datei (Debitoren 2025 neu.xlsx) hier hochladen", type=["xlsx"])
-
+# Hilfsfunktion für den Excel-Export
 def to_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Offene_Posten')
     return output.getvalue()
 
+# 2. Datei-Upload
+uploaded_file = st.file_uploader("Excel-Datei (Debitoren 2025 neu.xlsx) hochladen", type=["xlsx"])
+
 if uploaded_file:
+    # Sidebar für Einstellungen
+    st.sidebar.header("⚙️ Einstellungen")
+    
+    # Schritt 1: Header-Zeile bestimmen
+    header_idx = st.sidebar.number_input("In welcher Zeile stehen die Spaltennamen? (z.B. 1, 2, 3...)", 
+                                        min_value=1, value=3, step=1)
+    
     try:
-        # Wir laden das Blatt "2025 Debitoren"
-        df = pd.read_excel(uploaded_file, sheet_name="2025 Debitoren")
+        # Laden der Excel-Datei
+        xl = pd.ExcelFile(uploaded_file)
+        sheet_name = st.sidebar.selectbox("Tabellenblatt wählen", xl.sheet_names, 
+                                         index=0 if "2025 Debitoren" not in xl.sheet_names else xl.sheet_names.index("2025 Debitoren"))
         
-        # Spaltennamen bereinigen
-        df.columns = [str(c).strip() for c in df.columns]
+        # Einlesen mit der gewählten Header-Zeile (header_idx - 1 weil Python bei 0 anfängt zu zählen)
+        df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_idx-1)
+        
+        # Leere Spalten/Zeilen entfernen
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed')].dropna(how='all', axis=0)
 
-        # Automatische Spaltenerkennung (Sucht nach Schlüsselwörtern)
-        col_datum = next((c for c in df.columns if "Datum" in c), None)
-        col_betrag = next((c for c in df.columns if "Brutto" in c or "Summe" in c), None)
-        col_bezahlt = next((c for c in df.columns if "Bezahlt" in c or "Eingang" in c), None)
-        col_kunde = next((c for c in df.columns if "Kunde" in c or "Name" in c), "Kunde")
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("📍 Spalten zuordnen")
+        
+        # Spalten-Mapping durch den Nutzer
+        all_cols = df.columns.tolist()
+        
+        col_datum = st.sidebar.selectbox("Spalte für RE-Datum", all_cols, index=0 if len(all_cols)>0 else 0)
+        col_betrag = st.sidebar.selectbox("Spalte für Brutto-Betrag", all_cols, index=1 if len(all_cols)>1 else 0)
+        col_bezahlt = st.sidebar.selectbox("Spalte für 'gezahlt am' (Zahlungseingang)", all_cols, index=2 if len(all_cols)>2 else 0)
+        col_kunde = st.sidebar.selectbox("Spalte für Kunde/Projekt", all_cols, index=0)
 
-        if col_datum and col_betrag:
-            # Datenkonvertierung
-            df[col_datum] = pd.to_datetime(df[col_datum], errors='coerce')
-            df = df.dropna(subset=[col_datum])
+        if st.sidebar.button("Analyse starten"):
+            # --- DATENVERARBEITUNG ---
+            # Kopie erstellen um Warnungen zu vermeiden
+            data = df.copy()
             
-            # Beträge in Zahlen umwandeln (falls nötig)
-            if df[col_betrag].dtype == 'object':
-                df[col_betrag] = pd.to_numeric(df[col_betrag].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce')
+            # Datum konvertieren
+            data[col_datum] = pd.to_datetime(data[col_datum], errors='coerce')
+            data = data.dropna(subset=[col_datum])
             
-            df['Monat'] = df[col_datum].dt.strftime('%Y-%m')
-
-            # --- BERECHNUNGEN ---
-            # 1. Monatlicher Umsatz (geschriebene Rechnungen)
-            monats_umsatz = df.groupby('Monat')[col_betrag].sum().reset_index()
-
-            # 2. Offene Posten (Wenn in 'Bezahlt am' nichts steht)
-            # Wir prüfen auf leere Zellen (NaN)
-            offene_posten = df[df[col_bezahlt].isna()].copy()
+            # Betrag konvertieren
+            if data[col_betrag].dtype == 'object':
+                data[col_betrag] = pd.to_numeric(data[col_betrag].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce')
             
-            # --- WEB-AUSGABE (DASHBOARD) ---
-            
-            # KPI-Reihe
-            m1, m2, m3 = st.columns(3)
-            gesamtsumme = df[col_betrag].sum()
-            offen_summe = offene_posten[col_betrag].sum()
-            quote = (offen_summe / gesamtsumme * 100) if gesamtsumme > 0 else 0
+            data['Monat'] = data[col_datum].dt.strftime('%Y-%m')
 
-            m1.metric("Gesamt Fakturiert", f"{gesamtsumme:,.2f} €")
-            m2.metric("Offene Forderungen", f"{offen_summe:,.2f} €", delta=f"{quote:.1f}% Quote", delta_color="inverse")
-            m3.metric("Anzahl offene Rechnungen", f"{len(offene_posten)}")
+            # --- AUSWERTUNG ---
+            monats_umsatz = data.groupby('Monat')[col_betrag].sum().reset_index()
+            offene_posten = data[data[col_bezahlt].isna()].copy()
 
-            st.divider()
+            # --- UI AUSGABE ---
+            kpi1, kpi2, kpi3 = st.columns(3)
+            kpi1.metric("Gesamtumsatz", f"{data[col_betrag].sum():,.2f} €")
+            kpi2.metric("Offen", f"{offene_posten[col_betrag].sum():,.2f} €", delta_color="inverse")
+            kpi3.metric("Anzahl Rechnungen", len(data))
 
-            # Grafik-Sektion
-            col_left, col_right = st.columns([2, 1])
+            st.markdown("### 📈 Monatliche Rechnungsstellung")
+            fig = px.bar(monats_umsatz, x='Monat', y=col_betrag, text_auto='.2s', color_discrete_sequence=['#1f77b4'])
+            st.plotly_chart(fig, use_container_width=True)
 
-            with col_left:
-                st.subheader("📈 Umsatzentwicklung pro Monat")
-                fig = px.bar(monats_umsatz, x='Monat', y=col_betrag, 
-                             text_auto='.2s',
-                             color_discrete_sequence=['#1f77b4'],
-                             labels={col_betrag: "Umsatz in €", "Monat": "Monat"})
-                st.plotly_chart(fig, use_container_width=True)
-
-            with col_right:
-                st.subheader("ℹ️ Analyse-Info")
-                st.info(f"""
-                **Gefundene Spalten:**
-                - Datum: `{col_datum}`
-                - Betrag: `{col_betrag}`
-                - Zahlungsstatus: `{col_bezahlt}`
-                
-                Die Berechnung der offenen Posten basiert auf leeren Einträgen in der Spalte `{col_bezahlt}`.
-                """)
-
-            # Tabellen-Sektion
-            st.divider()
-            st.subheader("⚠️ Offene Posten (Nicht bezahlt)")
-            
+            st.markdown("### 🔴 Offene Posten")
             if not offene_posten.empty:
-                # Wichtige Spalten für die Anzeige auswählen
-                display_cols = [c for c in [col_datum, col_kunde, col_betrag, "Beleg-Nr."] if c in df.columns]
-                final_table = offene_posten[display_cols].sort_values(by=col_datum)
+                display_cols = [col_datum, col_kunde, col_betrag]
+                st.dataframe(offene_posten[display_cols].sort_values(by=col_datum), use_container_width=True)
                 
-                st.dataframe(final_table, use_container_width=True)
-
-                # Export Button
+                # Export
                 st.download_button(
-                    label="📥 Liste als Excel exportieren",
-                    data=to_excel(final_table),
-                    file_name="Sohn_Consult_Offene_Posten.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    label="📥 Diese Liste als Excel exportieren",
+                    data=to_excel(offene_posten[display_cols]),
+                    file_name="Sohn_Consult_Offene_Posten.xlsx"
                 )
             else:
-                st.success("Hervorragend! Alle Rechnungen sind als bezahlt markiert.")
-
+                st.success("Alle Rechnungen sind bezahlt!")
         else:
-            st.error(f"Spalten nicht erkannt. In deiner Tabelle wurden gefunden: {list(df.columns)}")
+            st.info("Bitte nimm die Einstellungen in der linken Seitenleiste vor und klicke auf 'Analyse starten'.")
 
     except Exception as e:
-        st.error(f"Fehler beim Lesen des Tabellenblatts '2025 Debitoren': {e}")
-        st.info("Bitte stelle sicher, dass die Excel-Datei ein Blatt mit dem exakten Namen '2025 Debitoren' enthält.")
+        st.error(f"Fehler beim Einlesen: {e}")
+        st.info("Tipp: Erhöhe die Zahl der 'Header-Zeile' in der Sidebar, bis die richtigen Spaltennamen erscheinen.")
