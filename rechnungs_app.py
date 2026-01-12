@@ -57,7 +57,6 @@ if fibu_file:
         header_row = st.number_input("Header-Zeile", min_value=1, value=3)
         
         try:
-            # Einlesen der Daten
             if mode == "DATEV Export":
                 content = fibu_file.getvalue().decode('latin-1', errors='ignore')
                 df_raw = pd.read_csv(StringIO(content), sep=None, engine='python', skiprows=1)
@@ -67,7 +66,7 @@ if fibu_file:
                 else:
                     df_raw = pd.read_excel(fibu_file, header=header_row-1)
             
-            # --- STABILITÄTS-FIX 1: Spaltennamen bereinigen ---
+            # Spaltennamen bereinigen
             df_raw.columns = [str(c).strip() for c in df_raw.columns]
             cols = [c for c in df_raw.columns if "Unnamed" not in c and c != "nan"]
             df_work = df_raw[cols].dropna(how='all', axis=0).copy()
@@ -82,12 +81,12 @@ if fibu_file:
             c_fae = st.selectbox("Fälligkeitsdatum", cols, index=find_idx(["fällig", "termin"]))
             c_nr = st.selectbox("RE-Nummer", cols, index=find_idx(["nummer", "belegfeld"]))
             c_kun = st.selectbox("Kunde", cols, index=find_idx(["kunde", "name"]))
-            c_bet = st.selectbox("Betrag", cols, index=find_idx(["brutto", "betrag", "umsatz"]))
+            c_bet = st.selectbox("Betrag", cols, index=find_idx(["betrag", "brutto", "umsatz"]))
             c_pay = st.selectbox("Zahldatum", cols, index=find_idx(["gezahlt", "ausgleich", "eingang"]))
 
-            # --- TRANSFORMATION & BEREINIGUNG ---
+            # Transformation
             df_work[c_dat] = pd.to_datetime(df_work[c_dat], errors='coerce')
-            df_work['Fällig_Raw'] = df_work[c_fae].astype(str) # Für Anzeige behalten
+            df_work['Fällig_Display'] = df_work[c_fae].astype(str) 
             df_work[c_fae] = pd.to_datetime(df_work[c_fae], errors='coerce')
             df_work[c_pay] = pd.to_datetime(df_work[c_pay], errors='coerce')
             
@@ -96,7 +95,6 @@ if fibu_file:
             
             df_work = df_work.dropna(subset=[c_dat, c_bet])
 
-            # --- KUNDENFILTER ---
             st.markdown("### 🔍 Filter")
             kunden_list = sorted(df_work[c_kun].dropna().unique().tolist())
             sel_kunden = st.multiselect("Kunden", options=kunden_list, default=kunden_list)
@@ -124,14 +122,13 @@ if fibu_file:
 
         tabs = st.tabs(["📊 Performance", "🔴 Aging & Offene Posten", "💎 Strategie & Risiko", "🔍 Forensik", "🏦 Bank-Match"])
 
-        # --- TAB 1: PERFORMANCE ---
         with tabs[0]:
             k1, k2, k3, k4 = st.columns(4)
             rev = f_df[c_bet].sum()
             k1.metric("Gesamtumsatz", format_euro(rev))
             k2.metric("Offene Posten", format_euro(df_offen[c_bet].sum()))
             dso = (df_paid[c_pay] - df_paid[c_dat]).dt.days.mean()
-            k1.metric("Ø Zahlungsdauer (DSO)", f"{dso:.1f} Tage" if not pd.isna(dso) else "N/A")
+            k3.metric("Ø Zahlungsdauer", f"{dso:.1f} Tage" if not pd.isna(dso) else "N/A")
             k4.metric("Belege", len(f_df))
 
             c_p1, c_p2 = st.columns([2, 1])
@@ -139,12 +136,37 @@ if fibu_file:
                 f_df['Monat'] = f_df[c_dat].dt.strftime('%Y-%m')
                 st.plotly_chart(px.bar(f_df.groupby('Monat')[c_bet].sum().reset_index(), x='Monat', y=c_bet, color_discrete_sequence=['#1E3A8A'], title="Umsatz pro Monat"), width='stretch')
             with c_p2:
-                # S-Kurve
                 f_df = f_df.sort_values(c_dat)
                 f_df['Kumuliert'] = f_df[c_bet].cumsum()
                 st.plotly_chart(px.area(f_df, x=c_dat, y='Kumuliert', title="Wachstumspfad", color_discrete_sequence=['#3B82F6']), width='stretch')
 
-        # --- TAB 2: AGING & OFFENE POSTEN ---
         with tabs[1]:
             st.subheader("Forderungs-Management")
-            col_a1, col_a2 = st.columns(
+            col_a1, col_a2 = st.columns([1, 2])
+            with col_a1:
+                df_offen['Verzug'] = (today - df_offen[c_fae]).dt.days
+                def bucket(d):
+                    if pd.isna(d): return "5. Unbekannt"
+                    if d <= 0: return "1. Pünktlich"
+                    if d <= 30: return "2. 1-30 Tage"
+                    if d <= 60: return "3. 31-60 Tage"
+                    return "4. > 60 Tage"
+                df_offen['Bucket'] = df_offen['Verzug'].apply(bucket)
+                st.plotly_chart(px.pie(df_offen.groupby('Bucket')[c_bet].sum().reset_index(), values=c_bet, names='Bucket', hole=0.5, title="Überfälligkeiten"), width='stretch')
+            
+            with col_a2:
+                df_predict = df_offen.groupby(c_fae)[c_bet].sum().reset_index()
+                if not df_predict.empty:
+                    df_predict['Betrag_Abs'] = df_predict[c_bet].abs().clip(lower=0.1) 
+                    st.plotly_chart(px.scatter(df_predict, x=c_fae, y=c_bet, size='Betrag_Abs', title="Cashflow-Prognose", color_discrete_sequence=['#10B981']), width='stretch')
+            
+            # Anzeige-Fix für Arrow-Browserfehler
+            disp_df = df_offen[[c_dat, c_fae, c_kun, c_bet, 'Verzug']].copy()
+            disp_df[c_dat] = disp_df[c_dat].dt.strftime('%d.%m.%Y')
+            disp_df[c_fae] = disp_df[c_fae].dt.strftime('%d.%m.%Y').fillna("unbekannt")
+            st.dataframe(disp_df.sort_values('Verzug', ascending=False), column_config={c_bet: st.column_config.NumberColumn(format="%.2f €")}, width='stretch')
+
+        with tabs[2]:
+            st.subheader("ABC-Analyse & Klumpenrisiko")
+            abc = f_df.groupby(c_kun)[c_bet].sum().reset_index().sort_values(by=c_bet, ascending=False)
+            st.plotly_chart(px.bar(abc.head(15), x=c_kun, y=c_bet, title="Top 15 Kundenumsätze", color_discrete_sequence=['#1E3A8A']), width='stretch')
