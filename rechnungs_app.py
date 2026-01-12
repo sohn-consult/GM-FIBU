@@ -5,6 +5,7 @@ from io import BytesIO, StringIO
 from datetime import datetime
 import numpy as np
 import re
+import warnings
 
 # -----------------------------
 # 1) PAGE SETUP + DESIGN
@@ -35,7 +36,7 @@ st.caption("Stable Core 2026: Forensic & Cashflow")
 st.markdown("---")
 
 # -----------------------------
-# 2) HELPERS (SLIM + ROBUST)
+# 2) HELPERS
 # -----------------------------
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
@@ -54,29 +55,55 @@ def parse_money(s: pd.Series) -> pd.Series:
 
 def parse_date(s: pd.Series) -> pd.Series:
     """
-    Date parser ohne dayfirst Konflikte:
-    - erkennt ISO (YYYY-MM-DD / YYYY-MM-DD HH:MM:SS) und parsed mit dayfirst=False
-    - erkennt deutsches Punktformat und parsed mit festem Format
-    - fallback dayfirst=True
+    Warnungsfreies Datum Parsing:
+    - niemals "infer format" auslösen
+    - explizite Formate für die häufigsten Muster
+    - exotische Fälle: silent fallback (Warnungen werden geschluckt)
     """
     if pd.api.types.is_datetime64_any_dtype(s):
         return pd.to_datetime(s, errors="coerce")
 
     x = s.astype(str).str.strip()
+    x = x.replace({"": np.nan, "nan": np.nan, "None": np.nan})
 
-    sample = x.dropna().head(50)
-    iso_ratio = sample.str.match(r"^\d{4}-\d{2}-\d{2}(\s+\d{2}:\d{2}:\d{2})?$").mean() if len(sample) else 0
-    dot_ratio = sample.str.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}$").mean() if len(sample) else 0
+    # Muster
+    iso_dt = x.str.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$", na=False)
+    iso_d  = x.str.match(r"^\d{4}-\d{2}-\d{2}$", na=False)
+    dot_d  = x.str.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}$", na=False)
+    slash_d = x.str.match(r"^\d{1,2}/\d{1,2}/\d{2,4}$", na=False)
+    dash_d = x.str.match(r"^\d{1,2}-\d{1,2}-\d{2,4}$", na=False)
 
-    if iso_ratio >= 0.5:
-        return pd.to_datetime(x, errors="coerce", dayfirst=False)
+    out = pd.Series(pd.NaT, index=x.index, dtype="datetime64[ns]")
 
-    if dot_ratio >= 0.5:
-        dt = pd.to_datetime(x, format="%d.%m.%Y", errors="coerce")
-        if dt.isna().mean() < 0.8:
-            return dt
+    # ISO datetime
+    if iso_dt.any():
+        out.loc[iso_dt] = pd.to_datetime(x.loc[iso_dt], format="%Y-%m-%d %H:%M:%S", errors="coerce")
 
-    return pd.to_datetime(x, errors="coerce", dayfirst=True)
+    # ISO date
+    if iso_d.any():
+        out.loc[iso_d] = pd.to_datetime(x.loc[iso_d], format="%Y-%m-%d", errors="coerce")
+
+    # DE dot date: 12.01.2026
+    if dot_d.any():
+        # akzeptiert auch 2-stellige Jahre schlecht, aber coerced
+        out.loc[dot_d] = pd.to_datetime(x.loc[dot_d], format="%d.%m.%Y", errors="coerce")
+
+    # Slash date: 12/01/2026 -> hier unterstellen wir dayfirst (DE Logik)
+    if slash_d.any():
+        out.loc[slash_d] = pd.to_datetime(x.loc[slash_d], format="%d/%m/%Y", errors="coerce")
+
+    # Dash date: 12-01-2026 -> dayfirst (DE Logik)
+    if dash_d.any():
+        out.loc[dash_d] = pd.to_datetime(x.loc[dash_d], format="%d-%m-%Y", errors="coerce")
+
+    # Rest: letzter Fallback, aber Warnungen unterdrücken (wichtig, wenn Warnungen als Fehler laufen)
+    rest = out.isna() & x.notna()
+    if rest.any():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            out.loc[rest] = pd.to_datetime(x.loc[rest], errors="coerce")
+
+    return out
 
 def format_euro(val) -> str:
     if pd.isna(val) or val is None:
@@ -97,12 +124,6 @@ def find_idx(cols, keys) -> int:
     return 0
 
 def make_arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Streamlit Arrow Crash Fix:
-    - object Spalten können mixed types enthalten
-    - Arrow versucht dann gern int64 und scheitert
-    Lösung: object Spalten deterministisch als pandas StringDtype
-    """
     out = df.copy()
     for c in out.columns:
         if out[c].dtype == "object":
@@ -159,22 +180,19 @@ with st.sidebar:
     c_bet = st.selectbox("Betrag", cols, index=find_idx(cols, ["brutto", "betrag", "umsatz", "summe"]))
     c_pay = st.selectbox("Zahldatum", cols, index=find_idx(cols, ["gezahlt", "ausgleich", "eingang", "zahlung"]))
 
-# Normalisierung
 df[c_dat] = parse_date(df[c_dat])
 df[c_fae] = parse_date(df[c_fae])
 df[c_pay] = parse_date(df[c_pay])
 df[c_bet] = parse_money(df[c_bet])
 
-# Anzeige Text (Arrow safe)
 df["Fällig_Text"] = df[c_fae].astype("string").fillna("")
 
-# Mindestvalidierung
 df = df.dropna(subset=[c_dat, c_bet]).copy()
 if df.empty:
     st.error("Nach Bereinigung keine gültigen Datensätze übrig.")
     st.stop()
 
-# Kritische Spalten hart typisieren (Arrow Crash Fix)
+# Arrow kritische Spalten fix typisieren
 if c_nr in df.columns:
     df[c_nr] = df[c_nr].astype("string")
 if c_kun in df.columns:
@@ -206,7 +224,6 @@ if not date_range or len(date_range) != 2:
     st.error("Bitte einen Zeitraum mit Start und Ende auswählen.")
     st.stop()
 
-# Robuster Kundenfilter
 kunden_mask = df[c_kun].isin(sel_kunden) if sel_kunden else True
 mask = (
     (df[c_dat].dt.date >= date_range[0]) &
