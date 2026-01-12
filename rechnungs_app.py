@@ -6,63 +6,37 @@ from datetime import datetime
 import numpy as np
 
 # --- 1. DESIGN & KONFIGURATION ---
-st.set_page_config(
-    page_title="Sohn-Consult | BI Dashboard",
-    page_icon="👔",
-    layout="wide"
-)
+st.set_page_config(page_title="Sohn-Consult | BI Dashboard", page_icon="👔", layout="wide")
 
-# Custom CSS für professionelles Branding und maximale Lesbarkeit
+# CSS für maximale Lesbarkeit und Sohn-Consult Branding
 st.markdown("""
     <style>
     .stApp { background-color: #FFFFFF; }
-    [data-testid="stSidebar"] {
-        background-color: #F1F5F9; 
-        border-right: 1px solid #CBD5E1;
-    }
-    [data-testid="stSidebar"] .stMarkdown p, 
-    [data-testid="stSidebar"] label {
-        color: #0F172A !important;
-        font-weight: 600 !important;
+    [data-testid="stSidebar"] { background-color: #F1F5F9; border-right: 1px solid #CBD5E1; }
+    [data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] label { 
+        color: #0F172A !important; 
+        font-weight: 600 !important; 
     }
     h1, h2, h3 { color: #1E3A8A; font-family: 'Inter', sans-serif; font-weight: 700; }
-    .stMetric {
-        background-color: #FFFFFF;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        border-top: 5px solid #1E3A8A;
+    .stMetric { 
+        background-color: #FFFFFF; padding: 20px; border-radius: 10px; 
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-top: 5px solid #1E3A8A; 
     }
-    .stButton>button {
-        background-color: #1E3A8A;
-        color: white;
-        border-radius: 8px;
-        font-weight: bold;
-        width: 100%;
-        height: 3.5em;
+    .stButton>button { 
+        background-color: #1E3A8A; color: white; border-radius: 8px; 
+        font-weight: bold; width: 100%; height: 3.5em; 
     }
-    .stTabs [aria-selected="true"] {
-        background-color: #1E3A8A !important;
-        color: white !important;
-        border-radius: 4px;
-    }
+    .stTabs [aria-selected="true"] { background-color: #1E3A8A !important; color: white !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# Hilfsfunktion für Euro-Formatierung (1.234,56 €)
+# Hilfsfunktion für Euro-Formatierung
 def format_euro(val):
     if pd.isna(val): return "0,00 €"
     return f"{val:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
 
-# Hilfsfunktion für den Excel-Export
-def to_excel(df):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Sohn_Consult_Analyse')
-    return output.getvalue()
-
 st.title("👔 Sohn-Consult | Business Intelligence")
-st.caption("Professionelles Reporting für Fibu-Daten, Forensik & Cashflow")
+st.caption("Professionelle Fibu-Analyse & Strategische Auswertung")
 st.markdown("---")
 
 # --- 2. DATEI-UPLOAD ---
@@ -74,7 +48,7 @@ if uploaded_file:
         mode = st.radio("Format auswählen", ["Standard Excel/CSV", "DATEV-Export (CSV)"])
         
         try:
-            # Einlese-Logik je nach Format
+            # Datei einlesen
             if mode == "DATEV-Export (CSV)":
                 raw_bytes = uploaded_file.getvalue()
                 content = raw_bytes.decode('latin-1', errors='ignore')
@@ -90,7 +64,7 @@ if uploaded_file:
                     sheet = st.selectbox("Tabellenblatt", xl.sheet_names)
                     df_raw = pd.read_excel(uploaded_file, sheet_name=sheet, header=header_row-1)
 
-            # Basis-Reinigung: Entferne leere Spalten/Zeilen
+            # Basis-Reinigung
             df_raw = df_raw.loc[:, ~df_raw.columns.str.contains('^Unnamed')].dropna(how='all', axis=0)
             all_cols = df_raw.columns.tolist()
 
@@ -100,140 +74,108 @@ if uploaded_file:
                     if any(k.lower() in str(c).lower() for k in keys): return i
                 return default if default < len(all_cols) else 0
 
-            # Mapping der Spalten
+            # Zuordnungen
             c_datum = st.selectbox("Rechnungsdatum", all_cols, index=find_idx(["datum", "belegdat"]))
             c_faellig = st.selectbox("Fälligkeitsdatum", all_cols, index=find_idx(["fällig", "termin"]))
             c_nr = st.selectbox("RE-Nummer", all_cols, index=find_idx(["belegfeld", "nummer", "re-nr"]))
             c_kunde = st.selectbox("Kunde", all_cols, index=find_idx(["name", "kunde"]))
             c_betrag = st.selectbox("Betrag (Brutto)", all_cols, index=find_idx(["brutto", "umsatz", "betrag"]))
-            c_bezahlt = st.selectbox("Zahldatum (leer = offen)", all_cols, index=find_idx(["bezahlt", "eingang"]))
+            c_bezahlt = st.selectbox("Zahldatum", all_cols, index=find_idx(["bezahlt", "eingang"]))
 
-            # --- DATEN-TRANSFORMATION ---
-            df_clean = df_raw.copy()
-            for col in [c_datum, c_faellig, c_bezahlt]:
-                df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce')
+            # --- VORBEREITUNG DER GEFILTERTEN DATEN ---
+            df_work = df_raw.copy()
+            df_work[c_datum] = pd.to_datetime(df_work[c_datum], errors='coerce')
+            df_work[c_faellig] = pd.to_datetime(df_work[c_faellig], errors='coerce')
+            df_work[c_bezahlt] = pd.to_datetime(df_work[c_bezahlt], errors='coerce')
             
-            if df_clean[c_betrag].dtype == 'object':
-                df_clean[c_betrag] = pd.to_numeric(df_clean[c_betrag].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce')
+            if df_work[c_betrag].dtype == 'object':
+                df_work[c_betrag] = pd.to_numeric(df_work[c_betrag].astype(str).str.replace('.', '').str.replace(',', '.'), errors='coerce')
             
-            # Wichtig: Nur Zeilen mit Datum und Betrag behalten
-            df_clean = df_clean.dropna(subset=[c_datum, c_betrag])
+            # Wichtig: Zeilen ohne Datum/Betrag entfernen, bevor Filter gebaut wird
+            df_work = df_work.dropna(subset=[c_datum, c_betrag])
 
-            # --- FILTER ---
             st.markdown("### 🔍 3. Filter")
-            if not df_clean.empty:
-                kunden_liste = sorted(df_clean[c_kunde].dropna().unique().tolist())
-                sel_kunden = st.multiselect("Kunden filtern", options=kunden_liste, default=kunden_liste)
+            if not df_work.empty:
+                # Kundenliste aus der gewählten Spalte extrahieren
+                kunden_options = sorted(df_work[c_kunde].dropna().unique().tolist())
                 
-                min_d, max_d = df_clean[c_datum].min().date(), df_clean[c_datum].max().date()
-                date_range = st.date_input("Zeitraum wählen", [min_d, max_d])
+                # DER FIX: Multiselect mit Fallback
+                sel_kunden = st.multiselect(
+                    "Kunden auswählen", 
+                    options=kunden_options, 
+                    default=kunden_options
+                )
+                
+                # Zeitbereich
+                min_d, max_d = df_work[c_datum].min().date(), df_work[c_datum].max().date()
+                date_range = st.date_input("Zeitraum", [min_d, max_d])
 
                 st.markdown("---")
+                # Start-Knopf
                 start_btn = st.button("🚀 ANALYSE STARTEN", use_container_width=True)
             else:
-                st.warning("Keine gültigen Daten gefunden. Prüfe die Header-Zeile.")
+                st.warning("Keine Daten gefunden. Prüfe Header & Spalten.")
                 start_btn = False
 
         except Exception as e:
-            st.error(f"Fehler beim Einlesen: {e}")
+            st.error(f"Fehler: {e}")
             start_btn = False
 
     # --- 3. HAUPTBEREICH: ANALYSE ---
     if start_btn and len(date_range) == 2:
-        # Filteranwendung
-        mask = (df_clean[c_datum].dt.date >= date_range[0]) & \
-               (df_clean[c_datum].dt.date <= date_range[1]) & \
-               (df_clean[c_kunde].isin(sel_kunden))
-        f_df = df_clean[mask].copy()
+        # Finale Filterung
+        mask = (df_work[c_datum].dt.date >= date_range[0]) & \
+               (df_work[c_datum].dt.date <= date_range[1]) & \
+               (df_work[c_kunde].isin(sel_kunden))
+        f_df = df_work[mask].copy()
 
         if f_df.empty:
             st.warning("Keine Daten für die gewählten Filter vorhanden.")
         else:
-            tabs = st.tabs(["📊 Dashboard", "🔴 Mahnwesen", "📅 Cashflow", "💎 ABC/Risk", "🔍 Forensik"])
+            tabs = st.tabs(["📊 Performance", "🔴 Mahnwesen", "💎 ABC/Risk", "🔍 Forensik"])
 
-            # --- TAB 1: DASHBOARD ---
             with tabs[0]:
                 m1, m2, m3 = st.columns(3)
                 offen_mask = f_df[c_bezahlt].isna()
-                total_rev = f_df[c_betrag].sum()
-                open_sum = f_df[offen_mask][c_betrag].sum()
-                
-                m1.metric("Gesamtumsatz", format_euro(total_rev))
-                m2.metric("Offene Forderungen", format_euro(open_sum))
-                m3.metric("Anzahl Belege", len(f_df))
+                m1.metric("Gesamtumsatz", format_euro(f_df[c_betrag].sum()))
+                m2.metric("Offene Posten", format_euro(f_df[offen_mask][c_betrag].sum()))
+                m3.metric("Belege", len(f_df))
                 
                 f_df['Monat'] = f_df[c_datum].dt.strftime('%Y-%m')
-                monats_data = f_df.groupby('Monat')[c_betrag].sum().reset_index()
-                fig = px.bar(monats_data, x='Monat', y=c_betrag, labels={c_betrag: "Umsatz in €"}, 
-                             color_discrete_sequence=['#1E3A8A'], title="Umsatzentwicklung")
-                fig.update_layout(yaxis_tickformat=',.2f')
-                st.plotly_chart(fig, use_container_width=True)
+                chart = f_df.groupby('Monat')[c_betrag].sum().reset_index()
+                st.plotly_chart(px.bar(chart, x='Monat', y=c_betrag, color_discrete_sequence=['#1E3A8A']), use_container_width=True)
 
-            # --- TAB 2: MAHNWESEN ---
             with tabs[1]:
-                st.subheader("Übersicht überfälliger Rechnungen")
                 offen = f_df[offen_mask].copy()
-                today = pd.Timestamp(datetime.now().date())
-                offen['Verzug'] = (today - offen[c_faellig]).dt.days
-                
                 if not offen.empty:
-                    st.dataframe(offen[[c_datum, c_faellig, c_kunde, c_betrag, 'Verzug']].sort_values(by='Verzug', ascending=False), 
-                                 column_config={c_betrag: st.column_config.NumberColumn(format="%.2f €")}, 
-                                 use_container_width=True)
-                    st.download_button("📥 Offene Posten (Excel)", to_excel(offen), "Offene_Posten_SohnConsult.xlsx")
-                else:
-                    st.success("Hervorragend! Alle Forderungen im Zeitraum sind beglichen.")
+                    offen['Verzug'] = (pd.Timestamp(datetime.now().date()) - offen[c_faellig]).dt.days
+                    st.dataframe(offen[[c_datum, c_kunde, c_betrag, 'Verzug']].sort_values(by='Verzug', ascending=False),
+                                 column_config={c_betrag: st.column_config.NumberColumn(format="%.2f €")}, use_container_width=True)
+                else: st.success("Alles bezahlt.")
 
-            # --- TAB 3: CASHFLOW ---
             with tabs[2]:
-                st.subheader("Liquiditätsprognose")
-                cf_data = offen.groupby(c_faellig)[c_betrag].sum().reset_index()
-                if not cf_data.empty:
-                    fig_cf = px.line(cf_data, x=c_faellig, y=c_betrag, markers=True, 
-                                     title="Erwartete Zahlungseingänge nach Fälligkeit", color_discrete_sequence=['#10B981'])
-                    fig_cf.update_layout(yaxis_tickformat=',.2f')
-                    st.plotly_chart(fig_cf, use_container_width=True)
-                else:
-                    st.info("Keine offenen Rechnungen für eine Cashflow-Prognose verfügbar.")
-
-            # --- TAB 4: ABC & KLUMPENRISIKO ---
-            with tabs[3]:
-                st.subheader("Strategische Kundenanalyse")
                 abc = f_df.groupby(c_kunde)[c_betrag].sum().reset_index().sort_values(by=c_betrag, ascending=False)
-                st.plotly_chart(px.pie(abc, values=c_betrag, names=c_kunde, hole=0.4, title="Umsatzverteilung nach Kunden"), use_container_width=True)
-                
-                top_3_pct = (abc[c_betrag].head(3).sum() / abc[c_betrag].sum()) * 100
-                st.metric("Klumpenrisiko (Top 3 Kunden)", f"{top_3_pct:.1f}%")
-                if top_3_pct > 60: st.warning("Strategischer Hinweis: Sehr hohe Abhängigkeit von wenigen Auftraggebern.")
+                st.plotly_chart(px.pie(abc, values=c_betrag, names=c_kunde, hole=0.4), use_container_width=True)
+                top_3 = (abc[c_betrag].head(3).sum() / abc[c_betrag].sum()) * 100
+                st.metric("Klumpenrisiko (Top 3)", f"{top_3:.1f}%")
 
-            # --- TAB 5: FORENSIK ---
-            with tabs[4]:
-                st.subheader("Forensische Prüfung & Daten-Integrität")
-                
-                # 1. Nummernkreis-Check
+            with tabs[3]:
+                st.subheader("Forensik & Logik")
+                # Nummernkreis
                 try:
                     nums = pd.to_numeric(f_df[c_nr], errors='coerce').dropna().astype(int).sort_values().unique()
                     if len(nums) > 1:
                         missing = np.setdiff1d(np.arange(nums.min(), nums.max() + 1), nums)
-                        if len(missing) > 0:
-                            st.warning(f"⚠️ Nummernkreis-Lücke: {len(missing)} Nummern fehlen (z.B. {missing[:5]}...)")
-                        else: st.success("✅ Rechnungsnummern sind lückenlos.")
-                except: st.info("Prüfung der RE-Nummern für dieses Format nicht möglich.")
+                        if len(missing) > 0: st.warning(f"⚠️ {len(missing)} Rechnungsnummern fehlen.")
+                        else: st.success("✅ RE-Nummern lückenlos.")
+                except: st.info("Check nicht verfügbar.")
                 
-                # 2. Logik-Check
-                logik_err = f_df[f_df[c_bezahlt] < f_df[c_datum]]
-                if not logik_err.empty:
-                    st.error("❌ Kritisch: Zahlung vor Rechnungsdatum gefunden!")
-                    st.dataframe(logik_err[[c_datum, c_bezahlt, c_kunde, c_betrag]])
-                
-                # 3. Betrags-Check
-                q_high = f_df[c_betrag].quantile(0.95)
-                st.info(f"💡 Statistische Ausreißer (Top 5% > {format_euro(q_high)}):")
-                st.dataframe(f_df[f_df[c_betrag] > q_high][[c_datum, c_kunde, c_betrag]], 
-                             column_config={c_betrag: st.column_config.NumberColumn(format="%.2f €")})
+                # Logik
+                err = f_df[f_df[c_bezahlt] < f_df[c_datum]]
+                if not err.empty: st.error("❌ Zahlung vor Rechnung gefunden!"); st.dataframe(err)
 
     else:
-        st.info("👋 Willkommen! Bitte laden Sie eine Datei hoch und konfigurieren Sie die Spalten in der Sidebar.")
+        st.info("Bitte Datei laden und links Filter einstellen. Dann 'Analyse starten'.")
         if 'df_raw' in locals():
-            st.markdown("### 📄 Vorschau der Rohdaten (erste 5 Zeilen):")
+            st.markdown("### 📄 Vorschau der Daten:")
             st.dataframe(df_raw.head(5))
