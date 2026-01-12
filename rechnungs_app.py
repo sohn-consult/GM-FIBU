@@ -8,8 +8,7 @@ import re
 import warnings
 
 # -----------------------------
-# 0) WARNINGS HARDENING
-# Wenn eure Runtime Warnings als Errors behandelt, stirbt sonst der Prozess
+# 0) HARDENING: falls Runtime Warnings als Errors behandelt
 # -----------------------------
 warnings.filterwarnings("ignore", message="Could not infer format*", category=UserWarning)
 warnings.filterwarnings("ignore", message="Parsing dates in %Y-%m-%d %H:%M:%S*", category=UserWarning)
@@ -45,14 +44,19 @@ st.markdown("---")
 # -----------------------------
 # 2) HELPERS
 # -----------------------------
-CORE_KEYS = {"kunde", "re-nr", "re nr", "re-nr.", "re nr.", "re-datum", "re datum", "fällig", "faellig", "gezahlt"}
+HEADER_KEYWORDS = [
+    "kunde", "debitor", "re-nr", "re nr", "re-nr.", "rechnung", "beleg",
+    "re-datum", "re datum", "datum", "fällig", "faellig", "termin",
+    "betrag", "brutto", "netto", "summe", "monat", "gezahlt", "eingang",
+    "zahlung", "ausgleich", "abzug"
+]
 
 def make_unique_columns(cols):
     seen = {}
     out = []
     for c in cols:
         base = str(c).strip()
-        if base == "" or base.lower() == "nan":
+        if base == "" or base.lower() in ("nan", "none"):
             base = "Spalte"
         if base not in seen:
             seen[base] = 1
@@ -62,42 +66,7 @@ def make_unique_columns(cols):
             out.append(f"{base}_{seen[base]}")
     return out
 
-def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    # Unnamed wird NICHT blind entfernt, weil in deinem File wichtige Spalten dort hängen
-    df.dropna(how="all", inplace=True)
-    return df
-
-def promote_header_if_needed(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Wenn die erste Zeile die echten Header enthält (z. B. Kunde, RE-Nr., RE-Datum),
-    setzen wir die als Spaltennamen.
-    """
-    if df.empty:
-        return df
-
-    row0 = df.iloc[0].astype(str).str.strip()
-    tokens = set([t.lower() for t in row0.tolist() if t and t.lower() != "nan"])
-
-    # Heuristik: mindestens 2 Kernbegriffe
-    hit = sum(any(k in token for k in ["kunde", "re-nr", "re nr", "re-datum", "re datum", "fällig", "faellig", "gezahlt"])
-              for token in tokens)
-
-    if hit >= 2:
-        new_cols = make_unique_columns(row0.tolist())
-        df2 = df.iloc[1:].copy()
-        df2.columns = new_cols
-        # Häufig ist Zeile 1 komplett leer -> entfernen
-        df2.dropna(how="all", inplace=True)
-        return df2
-
-    return df
-
 def make_arrow_safe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Arrow Crash Fix: object Spalten deterministisch stringen.
-    """
     out = df.copy()
     for c in out.columns:
         if out[c].dtype == "object":
@@ -109,17 +78,16 @@ def parse_money(s: pd.Series) -> pd.Series:
         return pd.to_numeric(s, errors="coerce")
     x = s.astype(str).str.strip()
     x = x.str.replace("€", "", regex=False).str.replace(" ", "", regex=False)
-    # DE Tausenderpunkt entfernen, Dezimalkomma zu Punkt
     x = x.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
     return pd.to_numeric(x, errors="coerce")
 
 def parse_date_strict(s: pd.Series) -> pd.Series:
     """
-    Warnungsfreies Parsing:
-    - ISO DateTime: YYYY-MM-DD HH:MM:SS
-    - ISO Date: YYYY-MM-DD
-    - DE: DD.MM.YYYY
-    - Sonst: NaT (keine Inference, keine Warnung)
+    Warnungsfrei, ohne Format Inference:
+    - ISO datetime: YYYY-MM-DD HH:MM:SS
+    - ISO date: YYYY-MM-DD
+    - DE dot: DD.MM.YYYY
+    - sonst NaT
     """
     if pd.api.types.is_datetime64_any_dtype(s):
         return pd.to_datetime(s, errors="coerce")
@@ -155,10 +123,59 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 def find_idx(cols, keys) -> int:
     for i, c in enumerate(cols):
-        c_low = str(c).lower()
-        if any(k in c_low for k in keys):
+        cl = str(c).lower()
+        if any(k in cl for k in keys):
             return i
     return 0
+
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    df.dropna(how="all", inplace=True)
+    return df
+
+def looks_like_header_cell(v: str) -> bool:
+    if not v:
+        return False
+    vl = v.strip().lower()
+    if vl in ("nan", "none"):
+        return False
+    return any(k in vl for k in HEADER_KEYWORDS)
+
+def normalize_header_from_first_row(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Für Dateien wie 'Debitoren 2025 neu.xlsx':
+    - echte Header stehen in Zeile 0 als Werte
+    - wir übernehmen NUR Zellen, die wie Header aussehen (Keywords)
+    - alle anderen Spalten bekommen stabile Namen col_XX
+    """
+    if df.empty:
+        return df
+
+    df2 = df.copy()
+    row0 = df2.iloc[0].astype(str).str.strip()
+
+    new_cols = []
+    header_hits = 0
+
+    for i, _old in enumerate(df2.columns):
+        v = row0.iloc[i] if i < len(row0) else ""
+        if looks_like_header_cell(v):
+            new_cols.append(v)
+            header_hits += 1
+        else:
+            new_cols.append(f"col_{i:02d}")
+
+    if header_hits >= 2:
+        df2 = df2.iloc[1:].copy()
+        df2.columns = make_unique_columns(new_cols)
+        df2.dropna(how="all", inplace=True)
+        if len(df2) > 0 and df2.iloc[0].isna().all():
+            df2 = df2.iloc[1:].copy()
+    else:
+        df2.columns = make_unique_columns([str(c) for c in df2.columns])
+
+    return df2
 
 # -----------------------------
 # 3) UPLOADS
@@ -180,27 +197,22 @@ with st.sidebar:
     st.header("⚙️ Konfiguration")
     mode = st.radio("Format", ["Standard Excel CSV", "DATEV Export"])
     header_row = st.number_input("Header Zeile", min_value=1, value=3)
-    auto_header = st.toggle("Auto Header Erkennung", value=True)
+    show_diagnostics = st.toggle("Diagnose anzeigen", value=False)
 
 try:
     if mode == "DATEV Export":
         content = fibu_file.getvalue().decode("latin-1", errors="ignore")
         df_raw = pd.read_csv(StringIO(content), sep=None, engine="python", skiprows=1)
+        df = clean_dataframe(df_raw)
+
     else:
         if fibu_file.name.lower().endswith(".csv"):
             df_raw = pd.read_csv(fibu_file, sep=None, engine="python")
+            df = clean_dataframe(df_raw)
         else:
-            # erst wie konfiguriert lesen, danach ggf. auto-header promoten
             df_raw = pd.read_excel(fibu_file, header=int(header_row - 1))
-
-    df = clean_dataframe(df_raw)
-
-    # Bei deinem Debitoren File ist die echte Header-Zeile oft im ersten Datensatz
-    if auto_header:
-        df = promote_header_if_needed(df)
-
-    # Spalten sauber machen
-    df.columns = make_unique_columns(df.columns.tolist())
+            df = clean_dataframe(df_raw)
+            df = normalize_header_from_first_row(df)
 
 except Exception as e:
     st.error("Import fehlgeschlagen.")
@@ -213,61 +225,48 @@ if df.empty:
 
 cols = df.columns.tolist()
 
-# -----------------------------
-# 5) DIAGNOSE PANEL (hilft bei Sonderformaten)
-# -----------------------------
-with st.expander("🧪 Diagnose: Import Struktur", expanded=False):
-    st.write("Erste Zeilen nach Import und Header Normalisierung:")
-    st.dataframe(make_arrow_safe(df.head(15)), width="stretch")
-    st.write("Spalten und Dtypes:")
-    dtypes_view = pd.DataFrame({"Spalte": df.columns, "dtype": [str(df[c].dtype) for c in df.columns]})
-    st.dataframe(make_arrow_safe(dtypes_view), width="stretch")
+if show_diagnostics:
+    with st.expander("🧪 Diagnose Import", expanded=True):
+        st.write("Erste Zeilen nach Header Normalisierung:")
+        st.dataframe(make_arrow_safe(df.head(20)), width="stretch")
+        dtypes_view = pd.DataFrame({"Spalte": df.columns, "dtype": [str(df[c].dtype) for c in df.columns]})
+        st.dataframe(make_arrow_safe(dtypes_view), width="stretch")
 
 # -----------------------------
-# 6) MAPPING
+# 5) MAPPING
 # -----------------------------
 with st.sidebar:
     st.subheader("📍 Mapping")
-
     c_dat = st.selectbox("Rechnungsdatum", cols, index=find_idx(cols, ["re-datum", "re datum", "datum"]))
     c_fae = st.selectbox("Fälligkeit", cols, index=find_idx(cols, ["fällig", "faellig", "termin"]))
     c_nr  = st.selectbox("RE Nummer", cols, index=find_idx(cols, ["re-nr", "re nr", "nummer", "beleg"]))
     c_kun = st.selectbox("Kunde", cols, index=find_idx(cols, ["kunde", "name", "debitor"]))
-    # Betrag: bevorzugt brutto, sonst netto, sonst "betrag"
-    c_bet = st.selectbox("Betrag", cols, index=find_idx(cols, ["betrag (brutto)", "brutto", "betrag", "netto", "umsatz", "summe"]))
+    c_bet = st.selectbox("Betrag", cols, index=find_idx(cols, ["betrag (brutto)", "brutto", "betrag", "netto", "summe", "umsatz"]))
     c_pay = st.selectbox("Zahldatum", cols, index=find_idx(cols, ["gezahlt", "eingang", "zahlung", "ausgleich"]))
 
 # -----------------------------
-# 7) NORMALISIERUNG (Typen stabil)
+# 6) NORMALISIERUNG (typenfest)
 # -----------------------------
-# Textkopie der Fälligkeit für Anzeige
-faellig_text = df[c_fae].astype("string") if c_fae in df.columns else pd.Series([""] * len(df), dtype="string")
-df["Fällig_Text"] = faellig_text.fillna("")
+df["Fällig_Text"] = df[c_fae].astype("string").fillna("") if c_fae in df.columns else pd.Series([""] * len(df), dtype="string")
 
-# Datum Felder strikt parsen
 df[c_dat] = parse_date_strict(df[c_dat])
 df[c_pay] = parse_date_strict(df[c_pay])
-
-# Fälligkeit: "sofort" bleibt Text, Datum wird streng geparsed
 df["_Fällig_Datum"] = parse_date_strict(df[c_fae]) if c_fae in df.columns else pd.Series(pd.NaT, index=df.index)
 
-# Betrag robust parsen
 df[c_bet] = parse_money(df[c_bet])
 
-# Kritische Spalten als String (Arrow Safety)
 if c_nr in df.columns:
     df[c_nr] = df[c_nr].astype("string")
 if c_kun in df.columns:
     df[c_kun] = df[c_kun].astype("string")
 
-# Mindestvalidierung
 df = df.dropna(subset=[c_dat, c_bet]).copy()
 if df.empty:
     st.error("Nach Bereinigung keine gültigen Datensätze: Rechnungsdatum oder Betrag fehlen.")
     st.stop()
 
 # -----------------------------
-# 8) FILTER
+# 7) FILTER
 # -----------------------------
 with st.sidebar:
     st.markdown("### 🔍 Filter")
@@ -315,6 +314,7 @@ tabs = st.tabs(["📊 Performance", "🔴 Forderungen", "💎 Strategie", "🔍 
 # -----------------------------
 with tabs[0]:
     k1, k2, k3, k4 = st.columns(4)
+
     rev = float(f_df[c_bet].sum())
     open_sum = float(df_offen[c_bet].sum()) if not df_offen.empty else 0.0
 
@@ -346,7 +346,6 @@ with tabs[1]:
     if df_offen.empty:
         st.info("Keine offenen Posten im Filter.")
     else:
-        # Verzug: nur wenn Fälligkeitsdatum vorhanden, sonst NaN
         df_offen["Verzug"] = np.where(
             df_offen["_Fällig_Datum"].isna(),
             np.nan,
